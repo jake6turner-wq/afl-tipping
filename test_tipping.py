@@ -404,6 +404,41 @@ class TestSeasonSimulation(unittest.TestCase):
                                    errors=[float(ME.margin_error), 900.0], t=0)
         self.assertEqual(acts[1], "F")
 
+    def test_being_level_at_the_top_is_not_leading_if_you_lose_the_countback(self):
+        # THE BUG. Level on points with the WORSE margin error is not the lead: a
+        # tie loses. Settling for the favourite here settles for defeat, so this
+        # tipster must keep deviating.
+        blunt = T.Tipster("Blunt", ME.points, ME.margin_error + 100)
+        games = [_game("G%d" % i, 1.9, 1.95) for i in range(3)]
+        p_fav = [T.favourite_prob(games[0], "odds_ratio")[0]] * 3
+        acts = T.simulated_actions(ME, [blunt], games, p_fav,
+                                   scores=[ME.points, ME.points],
+                                   errors=[float(ME.margin_error),
+                                           float(ME.margin_error + 100)], t=0)
+        self.assertEqual(acts[1], "D", "level but losing the countback must chase")
+        self.assertEqual(acts[0], "F", "level and winning the countback is leading")
+
+    def test_a_blunt_tipster_level_at_the_top_still_wins_sometimes(self):
+        # The end-to-end consequence: they must not be locked to exactly zero.
+        blunt = T.Tipster("Blunt", ME.points, ME.margin_error + 100)
+        games = [_game("G%d" % i, 1.9, 1.95) for i in range(8)]
+        table = self._sim(ME, [blunt], games, n_seasons=6000)
+        self.assertGreater(table["Blunt"], 0.01)
+
+    def test_the_countback_shapes_how_hard_a_chaser_pushes(self):
+        # Two rivals a point back off the same score; the one who would LOSE a tie
+        # needs an extra point, so it must deviate at least as often.
+        sharp = T.Tipster("Sharp", ME.points - 1, ME.margin_error - 100)
+        blunt = T.Tipster("Blunt", ME.points - 1, ME.margin_error + 100)
+        games = [_game("G%d" % i, 1.9, 1.95) for i in range(6)]
+        p_fav = [T.favourite_prob(games[0], "odds_ratio")[0]] * 6
+        acts = T.simulated_actions(ME, [sharp, blunt], games, p_fav,
+                                   scores=[ME.points, ME.points - 1, ME.points - 1],
+                                   errors=[float(ME.margin_error),
+                                           float(ME.margin_error - 100),
+                                           float(ME.margin_error + 100)], t=0)
+        self.assertEqual(acts[2], "D", "the one who loses the tiebreak must chase")
+
     def test_the_same_seed_reproduces_the_table(self):
         games = [_game("G%d" % i, 1.5, 2.6) for i in range(5)]
         a = self._sim(ME, RIVALS, games, n_seasons=2000, seed=42)

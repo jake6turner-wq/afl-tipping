@@ -37,10 +37,7 @@ One season, repeated `n_seasons` times:
 scores[i] = points[i]          errors[i] = margin_error[i]        (i = 0 is me)
 
 for each remaining game, in lock order:
-    leaders = every i holding the current maximum score
-    for each tipster i:
-        i in leaders          -> tip the favourite
-        otherwise             -> their level-0 best response (below)
+    every tipster picks their level-0 best response (below)
     draw one result:  favourite wins with probability p_fav[t]
     every tipster whose tip was correct scores +1
     if it is a margin game, accumulate |actual - tip| for everyone
@@ -48,29 +45,43 @@ for each remaining game, in lock order:
 winner = highest score; ties broken by lowest accumulated margin error
 ```
 
+**The leader tipping favourites is emergent, not imposed.** Whoever is genuinely
+winning has terminal value 1.0 at delta 0, so deviating can only risk it and the DP
+picks the favourite for them unprompted. There is no special case, which is what
+lets the rule stay correct when "leading" and "winning" come apart.
+
 The result is drawn **once per game and shared by every tipster**, which is what
 couples them — they are tipping the same match.
 
-The leader is recomputed **every game**, so the always-favourite role passes around
-as the lead changes during the season. That is the behaviour the fixed
-start-of-season assignment could not express.
+Standings are re-read **every game**, so the always-favourite behaviour passes around
+as the lead changes during the season. That is what the fixed start-of-season
+assignment could not express.
 
 ### Each tipster's decision
 
-A non-leader believes everyone else tips favourites from here. Their final position
-relative to the field then depends only on their deficit to the current leaders:
+A tipster believes everyone else tips favourites from here, so they win exactly when
+they finish ahead of **every** opponent — counting a tie as a win only where their
+own margin error is the lower one:
 
 ```
-need      = (current top score) - (my score)
-tied set  = the current leaders
-terminal(delta) = 1.0            if delta >  need      (outright)
-                  countback      if delta == need      (tie for first)
-                  0.0            otherwise
+standing = [(points_j - points_i, who wins a tie) for every opponent j]
+
+terminal(delta) = 0.0   if delta < gap for any j            (behind them)
+                  0.0   if delta == gap and they win the tie
+                  0.5   if delta == gap and the errors are equal
+                  1.0   otherwise                            (clear of everyone)
 ```
 
-`countback` is their belief about the tiebreak, from margin errors **as accumulated
-so far in this simulation** — the existing hard 1 / 0.5 / 0 rule, multiplied across
-the tied set, exactly as `rival_terminal` already does.
+Margin errors are those **accumulated so far in this simulation**, so the target
+tightens or loosens as the margin games land.
+
+**Points alone are not the state.** A tipster level with the top but holding the
+worse margin error is not leading — a tie is a loss — and must keep chasing. An
+earlier version keyed the decision on the deficit to the top score plus a single
+countback flag against the current leaders, which made exactly this mistake: on
+drawing level, the tipster was classed as a leader, stopped deviating, and settled
+for a tie it would lose. On the live board that pinned NRL > AFL at 0%, reaching the
+top score in 49.5% of seasons and never once alone.
 
 That terminal feeds `solve_level0` over the *remaining* games, carrying the usual
 `reluctance`, and the action is read at delta 0. So each tipster re-solves from the
@@ -78,10 +89,11 @@ live state every game, which is what "decide again once the result is known" mea
 
 ### Caching
 
-Every non-leader at a given game shares the same tied set, so the decision depends
-only on `(game index, need, countback belief)`. The number of distinct keys is in the
-hundreds across a whole run, against 20,000 x 18 x 7 lookups, so the DP is solved a
-few hundred times rather than millions.
+The decision depends on `(game index, the multiset of (gap, tiebreak) over
+opponents)`. The multiset is order-independent, so sorting canonicalises it. Distinct
+keys number in the thousands across a whole run against 20,000 x 17 x 7 lookups, so
+the DP still runs a few thousand times rather than millions. Measured cost of the
+whole table at 20,000 seasons: about 3 seconds.
 
 ## Reporting
 
@@ -93,10 +105,16 @@ WHO WINS THE COMP  (simulated, 20000 seasons, +/- ~0.3%)
     Ryan Board       ..%
     Jake Turner      ..%   <-- you
     ...
-    Your headline P(win comp) above is the EXACT solve of your optimal policy.
-    This row has you playing the same level-0 rule as everyone else, so it is
-    lower. The gap is what your optimal policy is worth.
+    Your row is NOT the headline P(win comp) -- they are different models, and
+    TWO things change at once. This row has you on the same level-0 rule as
+    everyone else rather than your exact optimum, which costs you; but the
+    rivals also change, gaining a moving leader role and losing their forced
+    lockstep. Those pull opposite ways, so neither number bounds the other.
 ```
+
+Neither direction can be assumed. On the live board the simulated row came out
+*above* the headline, because the change to the rival model outweighed the loss of
+my exact policy.
 
 `recommendation.csv` gains `winner,<name>,<probability>` rows plus a
 `winner,_seasons,<n>` row recording the sample size.
@@ -120,8 +138,11 @@ use `subset_prob` and `pairwise`.
   sampling error, which the grouped model could not produce.
 - **A rival who shared a policy group under the old model now has a non-zero
   probability** — the point of the change.
-- The current leader always tips the favourite; a rigged fixture where the leader
-  would otherwise deviate confirms the rule fires.
+- Whoever is genuinely winning tips the favourite, without a special case.
+- **A tipster level on points but losing the countback keeps deviating**, and ends up
+  with a non-zero win probability rather than being pinned at 0.
+- Of two rivals a point back off the same score, the one who would lose a tie must
+  deviate at least as readily as the one who would win it.
 - The same seed reproduces the same table exactly.
 - Doubling the season count moves each probability by less than a few standard
   errors.

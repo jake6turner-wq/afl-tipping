@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 77 tests, ~1.2s
+python3 test_tipping.py                       # 80 tests, ~2.4s
 ```
 
 ## Input sets
@@ -124,9 +124,10 @@ the race.**
 - **The tip recommendation still groups rivals.** `solve_joint` must: ungrouped, its
   state is seven independent deltas, around `41^7` nodes against the ~26 the grouped
   version reaches. Only the win-probability table is ungrouped.
-- **A rival's margin error can matter more than their tipping.** NRL > AFL reaches the
-  top score in about half of all simulated seasons and wins none of them: he is never
-  there alone, and the worst margin error in the field loses every countback.
+- **Margin error drives how hard a rival chases.** A tipster who would lose a tie has
+  to win outright, so they deviate more and carry more variance. That is why
+  ADRIANOartini (647) consistently finishes above Mikefooty (596) despite the worse
+  error and the same points: needing more forces him to try more.
 - **Rivals don't respond to you.** No equilibrium solve, so the engine can't tell you
   how the leader would counter your deviation. That matters at the last game or two
   and essentially nowhere before.

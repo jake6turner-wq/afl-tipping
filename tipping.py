@@ -606,28 +606,41 @@ def solve_joint(
 # --------------------------------------------------------------------------------
 
 def _decision_cache(p_fav: Sequence[float], reluctance: float, clamp: int):
-    """Build the cached 'should I take the dog' lookup for a non-leading tipster.
+    """Build the cached 'should I take the dog' lookup.
 
-    A non-leader believes the rest of the field tips favourites from here, so their
-    whole decision reduces to (games remaining, deficit to the lead, what the
-    countback would do if they drew level). Every non-leader at a given game shares
-    the same set of leaders, so the key space is tiny and the DP runs a few hundred
-    times across a whole run rather than millions.
+    A tipster believes the rest of the field tips favourites from here, so their
+    decision depends on where they stand against EVERY opponent -- on points and on
+    the countback together. Being level with the top is only leading if you would
+    win the tiebreak; level with a sharper margin tipper is a loss, and has to be
+    chased like one.
+
+    The state is therefore the multiset of (points gap, who wins a tie) over the
+    opponents. It is order-independent, so sorting it canonicalises the key and the
+    DP runs a few thousand times across a whole run rather than millions.
     """
-    cache: Dict[Tuple[int, int, float], str] = {}
+    cache: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], str] = {}
 
-    def action(t: int, need: int, countback: float) -> str:
-        key = (t, need, countback)
+    def action(t: int, standing: Tuple[Tuple[int, int], ...]) -> str:
+        key = (t, standing)
         hit = cache.get(key)
         if hit is not None:
             return hit
 
         def terminal(delta: int) -> float:
-            if delta > need:
-                return 1.0            # clear of the lead outright
-            if delta == need:
-                return countback      # level with the lead: the tiebreak decides
-            return 0.0
+            # Win iff I finish ahead of every opponent, counting a tie as a win
+            # only where my margin error is the lower one.
+            value = 1.0
+            for gap, tiebreak in standing:
+                if delta > gap:
+                    continue                  # clear of them outright
+                if delta < gap:
+                    return 0.0                # behind them
+                if tiebreak > 0:
+                    continue                  # level, and I take the countback
+                if tiebreak < 0:
+                    return 0.0                # level, and I lose the countback
+                value *= 0.5                  # level on points AND on error
+            return value
 
         _, policy = solve_level0(p_fav[t:], terminal, clamp=clamp,
                                  reluctance=reluctance)
@@ -658,24 +671,30 @@ def simulated_actions(
 
 
 def _actions(scores, errors, t, decide) -> List[str]:
-    top = max(scores)
-    leaders = [i for i, s in enumerate(scores) if s == top]
-    best_leader_error = min(errors[i] for i in leaders)
+    """Each tipster's action given the live standings, using margin errors as
+    accumulated so far in this very season.
 
+    There is no special case for the leader. Whoever is genuinely winning has
+    nothing to gain by differentiating, so the DP picks the favourite for them on
+    its own -- and a tipster who is level on points but behind on the countback is
+    NOT winning, and correctly keeps chasing.
+    """
+    n = len(scores)
     acts = []
-    for i, score in enumerate(scores):
-        if score == top:
-            acts.append("F")          # leading: freeze the board
-            continue
-        # Belief about the tiebreak if they draw level with the current leaders,
-        # from the margin errors accumulated so far in this very season.
-        if errors[i] < best_leader_error:
-            countback = 1.0
-        elif errors[i] > best_leader_error:
-            countback = 0.0
-        else:
-            countback = 0.5
-        acts.append(decide(t, top - score, countback))
+    for i in range(n):
+        standing = []
+        for j in range(n):
+            if j == i:
+                continue
+            if errors[i] < errors[j]:
+                tiebreak = 1
+            elif errors[i] > errors[j]:
+                tiebreak = -1
+            else:
+                tiebreak = 0
+            standing.append((scores[j] - scores[i], tiebreak))
+        standing.sort()
+        acts.append(decide(t, tuple(standing)))
     return acts
 
 
