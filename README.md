@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 64 tests, ~0.7s
+python3 test_tipping.py                       # 78 tests, ~2.4s
 ```
 
 ## Input sets
@@ -95,6 +95,15 @@ A tie for first goes to the lowest cumulative margin error, so the terminal valu
 simulating the actual margin, which captures the fact that everyone's error is
 measured against the *same* result and so is correlated across rivals.
 
+`--recommend` also prints `WHO WINS THE COMP`: every tipster's probability of
+finishing first in one shared world, where each plays their own best response. It is
+a real distribution and sums to 100%, and your row equals the headline exactly.
+
+Read the marked rows carefully. Rivals with identical policies are collapsed onto one
+delta dimension, so the engine has them tipping alike for the rest of the season and
+their order frozen at today's points — anyone sharing a group with a higher-pointed
+rival shows 0% by construction, not by form.
+
 ## Read the output critically
 
 - **`tau = 10` is assumed, not fitted.** It is the dispersion of rivals' margin tips
@@ -107,6 +116,10 @@ measured against the *same* result and so is correlated across rivals.
   the field is frozen and stops deviating once they're far enough ahead, which
   flatters you. `CHASER MODEL SENSITIVITY` reports the relentless variants; check
   the recommended action is stable across them.
+- **Rivals sharing a policy are perfectly correlated.** Collapsing them onto one
+  delta assumes they tip identically all season, which freezes their relative order.
+  It is harmless for your own number — what matters is whether *any* of them beats
+  you — but it makes the per-person split inside a group meaningless.
 - **Rivals don't respond to you.** No equilibrium solve, so the engine can't tell you
   how the leader would counter your deviation. That matters at the last game or two
   and essentially nowhere before.
