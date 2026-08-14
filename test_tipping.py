@@ -4,6 +4,7 @@
 Run:  python3 test_tipping.py
 """
 
+import math
 import unittest
 
 import tipping as T
@@ -459,6 +460,84 @@ class TestSeasonSimulation(unittest.TestCase):
         games = [_game("G0", 1.0001, 5000.0, margin=True)]
         table = self._sim(ME, [blunt], games, n_seasons=500)
         self.assertGreater(table[ME.name], 0.95)
+
+
+class TestSimulatedRecommendation(unittest.TestCase):
+    """The next decision, derived from the simulation itself."""
+
+    def _branches(self, me, rivals, games, n_seasons=4000, seed=13):
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        return T.simulate_branches(me, rivals, games, p_fav,
+                                   n_seasons=n_seasons, seed=seed)
+
+    def test_each_branch_is_its_own_distribution(self):
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(5)]
+        r = self._branches(ME, RIVALS, games)
+        for table in (r.table_favourite, r.table_underdog):
+            self.assertAlmostEqual(sum(p for _, p in table), 1.0, places=9)
+
+    def test_my_row_equals_the_headline_for_the_chosen_branch(self):
+        # THE ALIGNMENT. Whatever the recommendation is, the table shown must be
+        # the table from that branch, and my row in it must be the headline number.
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(5)]
+        r = self._branches(ME, RIVALS, games)
+        chosen = r.table_underdog if r.action == "D" else r.table_favourite
+        self.assertEqual(r.table, chosen)
+        self.assertAlmostEqual(dict(r.table)[ME.name], r.p_win, places=12)
+
+    def test_the_recommendation_takes_the_better_branch(self):
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(5)]
+        r = self._branches(ME, RIVALS, games)
+        self.assertAlmostEqual(r.p_win, max(r.p_win_favourite, r.p_win_underdog),
+                               places=12)
+        self.assertEqual(r.action, "D" if r.p_win_underdog > r.p_win_favourite else "F")
+
+    def test_each_branch_replays_the_very_same_drawn_seasons(self):
+        # The pairing: a branch here must be bit-identical to running the single
+        # simulation with that tip forced, on the same seed. Same draws, same
+        # replay -- so the two branches differ only by my forced first tip.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(5)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        r = self._branches(ME, RIVALS, games, n_seasons=1500, seed=21)
+        for branch, table in (("F", r.table_favourite), ("D", r.table_underdog)):
+            solo = T.simulate_seasons(ME, RIVALS, games, p_fav, n_seasons=1500,
+                                      seed=21, force_first_me=branch)
+            self.assertEqual(table, solo, "branch %s must match the solo run" % branch)
+
+    def test_a_decided_race_has_no_uncertainty_on_the_edge(self):
+        # Nobody can catch the leader, so my tip changes nothing in any season:
+        # every paired difference is exactly zero, hence so is their spread.
+        runaway = T.Tipster("Runaway", ME.points + 40, 1)
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        r = self._branches(ME, [runaway], games, n_seasons=500)
+        self.assertAlmostEqual(r.stderr_edge, 0.0, places=12)
+        self.assertAlmostEqual(r.p_win_favourite, r.p_win_underdog, places=12)
+
+    def test_the_edge_error_is_measured_not_assumed(self):
+        # Reported from the realised per-season differences, so it need not match
+        # the independence formula -- the branches are not independent.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(6)]
+        r = self._branches(ME, RIVALS, games, n_seasons=4000)
+        self.assertGreater(r.stderr_edge, 0.0)
+        self.assertLess(r.stderr_edge, 0.05)
+
+    def test_taking_a_hopeless_dog_is_never_recommended(self):
+        # A near-certain favourite in the next game, and I am already winning:
+        # deviating can only cost me, so the favourite must win the comparison.
+        games = [_game("G0", 1.0001, 5000.0)] + [_game("G%d" % i, 1.6, 2.4)
+                                                 for i in range(1, 4)]
+        leader = T.Tipster("Jake Turner", 200, 1, is_me=True)
+        r = self._branches(leader, RIVALS, games, n_seasons=1500)
+        self.assertEqual(r.action, "F")
+        self.assertGreaterEqual(r.p_win_favourite, r.p_win_underdog)
+
+    def test_it_is_reproducible(self):
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(4)]
+        a = self._branches(ME, RIVALS, games, n_seasons=1500, seed=8)
+        b = self._branches(ME, RIVALS, games, n_seasons=1500, seed=8)
+        self.assertEqual(a.table, b.table)
+        self.assertEqual(a.p_win_favourite, b.p_win_favourite)
+        self.assertEqual(a.p_win_underdog, b.p_win_underdog)
 
 
 class TestDeviationReluctance(unittest.TestCase):

@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 80 tests, ~2.4s
+python3 test_tipping.py                       # 88 tests, ~5s
 ```
 
 ## Input sets
@@ -95,19 +95,28 @@ A tie for first goes to the lowest cumulative margin error, so the terminal valu
 simulating the actual margin, which captures the fact that everyone's error is
 measured against the *same* result and so is correlated across rivals.
 
-`--recommend` also prints `WHO WINS THE COMP`, from a separate **season simulation**
+The next tip is chosen **by the simulation itself**. Every season is drawn once and
+played twice — once tipping the favourite, once the underdog — over identical results
+and identical margin draws, and the branch with the higher eventual win rate wins. So
+the headline `P(win comp)` and your row in `WHO WINS THE COMP` are the same number
+from the same run.
+
+From the second game onward you play the same level-0 rule as everyone else, which
+makes this exact one-step lookahead over a rollout policy rather than a full optimum.
+The exact grouped solve still runs and is printed as a cross-check; a `WARNING` fires
+if the two models pick different tips, or if the edge is inside the sampling error.
+
+`WHO WINS THE COMP` comes from the same **season simulation**
 (`--sim-seasons`, default 60000). Each season is played out game by game: everyone
 re-decides from the live standings after every result, one result is drawn and shared
 by all of them, and whoever leads *at that moment* tips the favourite — so the
 always-favourite role passes around as the lead changes. Nobody shares a policy, so a
 rival who decides to chase a run of upsets is making their own choice.
 
-Your row there will not match the headline `P(win comp)`. They are different models
-and two things differ at once: the simulation has you playing the same level-0 rule as
-everyone else rather than your exact optimum, which costs you, while the rivals gain a
-moving leader role and lose their forced lockstep, which here helps you. Neither
-number bounds the other. **The headline drives the tip; the table shows the shape of
-the race.**
+Everything below the table — baselines, chaser sensitivity, devig sensitivity, the
+margin-tip sweep — still comes from the exact grouped solve, which is a different
+model with different absolute numbers. Read those as **relative comparisons**, not
+against the headline.
 
 ## Read the output critically
 

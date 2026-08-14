@@ -698,6 +698,72 @@ def _actions(scores, errors, t, decide) -> List[str]:
     return acts
 
 
+def _draw_season(games, p_fav, n_rivals, random_f, gauss, tau, sigma):
+    """Pre-draw one season's randomness so both branches can replay it identically.
+
+    The draws never depend on anyone's tips, so pulling them up front costs nothing
+    and buys a paired comparison: the only difference between the two branches is
+    my forced first tip, not the luck.
+    """
+    results = [random_f() < p_fav[t] for t in range(len(games))]
+    margins = {}
+    for t, game in enumerate(games):
+        if game.is_margin_game and game.line_fav is not None:
+            margins[t] = (gauss(game.line_fav, sigma),
+                          [gauss(game.line_fav, tau) for _ in range(n_rivals)])
+    return results, margins
+
+
+def _play_season(games, start_scores, start_errors, results, margins, decide,
+                 force_first_me):
+    """Replay one pre-drawn season. Returns (final scores, final margin errors)."""
+    scores = list(start_scores)
+    errors = list(start_errors)
+    n = len(scores)
+
+    for t, game in enumerate(games):
+        acts = _actions(scores, errors, t, decide)
+        if t == 0 and force_first_me is not None:
+            acts[0] = force_first_me
+        fav_won = results[t]
+        for i in range(n):
+            if (acts[i] == "F") == fav_won:
+                scores[i] += 1
+        drawn = margins.get(t)
+        if drawn is not None:
+            actual, rival_tips = drawn
+            # I tip the line; the median minimises E|M - m|. Rivals scatter.
+            errors[0] += abs(actual - game.line_fav)
+            for j in range(1, n):
+                errors[j] += abs(actual - rival_tips[j - 1])
+    return scores, errors
+
+
+def _season_winners(scores, errors):
+    """Indices sharing first place: top score, then lowest accumulated error."""
+    top = max(scores)
+    contenders = [i for i in range(len(scores)) if scores[i] == top]
+    if len(contenders) > 1:
+        best = min(errors[i] for i in contenders)
+        contenders = [i for i in contenders if errors[i] == best]
+    return contenders
+
+
+@dataclass(frozen=True)
+class SimulatedRecommendation:
+    """The next decision and the race, both read off the same simulation."""
+    action: str                                   # "F" or "D"
+    p_win: float                                  # my P(first) under `action`
+    p_win_favourite: float
+    p_win_underdog: float
+    table: List[Tuple[str, float]]                # the chosen branch's table
+    table_favourite: List[Tuple[str, float]]
+    table_underdog: List[Tuple[str, float]]
+    n_seasons: int
+    stderr_level: float                           # on any single probability
+    stderr_edge: float                            # on the favourite-minus-dog edge
+
+
 def simulate_seasons(
     me: Tipster,
     rivals: Sequence[Tipster],
@@ -709,6 +775,7 @@ def simulate_seasons(
     tau: float = TAU_TIP,
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
+    force_first_me: Optional[str] = None,
 ) -> List[Tuple[str, float]]:
     """Play the rest of the season out `n_seasons` times; return P(finish first).
 
@@ -724,31 +791,14 @@ def simulate_seasons(
 
     decide = _decision_cache(p_fav, reluctance, clamp)
     rng = random.Random(seed)
-    random_f, gauss = rng.random, rng.gauss
     wins = [0.0] * n
 
     for _ in range(n_seasons):
-        scores = list(start_scores)
-        errors = list(start_errors)
-
-        for t, game in enumerate(games):
-            acts = _actions(scores, errors, t, decide)
-            fav_won = random_f() < p_fav[t]
-            for i in range(n):
-                if (acts[i] == "F") == fav_won:
-                    scores[i] += 1
-            if game.is_margin_game and game.line_fav is not None:
-                actual = gauss(game.line_fav, sigma)
-                # I tip the line; the median minimises E|M - m|. Rivals scatter.
-                errors[0] += abs(actual - game.line_fav)
-                for j in range(1, n):
-                    errors[j] += abs(actual - gauss(game.line_fav, tau))
-
-        top = max(scores)
-        contenders = [i for i in range(n) if scores[i] == top]
-        if len(contenders) > 1:
-            best = min(errors[i] for i in contenders)
-            contenders = [i for i in contenders if errors[i] == best]
+        results, margins = _draw_season(games, p_fav, n - 1, rng.random, rng.gauss,
+                                        tau, sigma)
+        scores, errors = _play_season(games, start_scores, start_errors, results,
+                                      margins, decide, force_first_me)
+        contenders = _season_winners(scores, errors)
         share = 1.0 / len(contenders)
         for i in contenders:
             wins[i] += share
@@ -756,6 +806,91 @@ def simulate_seasons(
     table = [(names[i], wins[i] / n_seasons) for i in range(n)]
     table.sort(key=lambda row: (-row[1], row[0]))
     return table
+
+
+def simulate_branches(
+    me: Tipster,
+    rivals: Sequence[Tipster],
+    games: Sequence[Game],
+    p_fav: Sequence[float],
+    n_seasons: int = 60_000,
+    seed: int = 20260814,
+    reluctance: float = RELUCTANCE,
+    tau: float = TAU_TIP,
+    sigma: float = SIGMA_MARGIN,
+    clamp: int = DELTA_CLAMP,
+) -> SimulatedRecommendation:
+    """Decide the next tip from the simulation itself, and report the race under it.
+
+    Every season is drawn ONCE and played twice: once with my next tip forced to the
+    favourite, once to the underdog. Both branches see identical results and
+    identical margin draws, so this answers the actual counterfactual -- in THIS
+    season, which choice would have been better -- rather than comparing two
+    different seasons.
+
+    Note the pairing does not reduce variance here, and mildly increases it: the
+    same result that rewards tipping the favourite punishes tipping the dog, so the
+    branches come out slightly ANTI-correlated. `stderr_edge` is measured from the
+    realised per-season differences rather than assumed, so it reports that
+    honestly instead of understating it with an independence formula.
+
+    From the second game onward I play the same level-0 rule as everyone else, so
+    this is exact one-step lookahead over a rollout policy, not a full optimum.
+    """
+    names = [me.name] + [r.name for r in rivals]
+    start_scores = [me.points] + [r.points for r in rivals]
+    start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
+    n = len(names)
+
+    decide = _decision_cache(p_fav, reluctance, clamp)
+    rng = random.Random(seed)
+    wins = {"F": [0.0] * n, "D": [0.0] * n}
+    diff_sum = 0.0
+    diff_sq = 0.0
+
+    for _ in range(n_seasons):
+        results, margins = _draw_season(games, p_fav, n - 1, rng.random, rng.gauss,
+                                        tau, sigma)
+        mine = {}
+        for branch in ("F", "D"):
+            scores, errors = _play_season(games, start_scores, start_errors, results,
+                                          margins, decide, branch)
+            contenders = _season_winners(scores, errors)
+            share = 1.0 / len(contenders)
+            row = wins[branch]
+            for i in contenders:
+                row[i] += share
+            mine[branch] = share if 0 in contenders else 0.0
+        d = mine["F"] - mine["D"]
+        diff_sum += d
+        diff_sq += d * d
+
+    def table_of(branch: str) -> List[Tuple[str, float]]:
+        rows = [(names[i], wins[branch][i] / n_seasons) for i in range(n)]
+        rows.sort(key=lambda row: (-row[1], row[0]))
+        return rows
+
+    table_f, table_d = table_of("F"), table_of("D")
+    p_f = wins["F"][0] / n_seasons
+    p_d = wins["D"][0] / n_seasons
+
+    mean_d = diff_sum / n_seasons
+    variance = max(0.0, diff_sq / n_seasons - mean_d * mean_d)
+    stderr_edge = math.sqrt(variance / n_seasons)
+
+    action = "D" if p_d > p_f else "F"
+    return SimulatedRecommendation(
+        action=action,
+        p_win=max(p_f, p_d),
+        p_win_favourite=p_f,
+        p_win_underdog=p_d,
+        table=table_d if action == "D" else table_f,
+        table_favourite=table_f,
+        table_underdog=table_d,
+        n_seasons=n_seasons,
+        stderr_level=math.sqrt(0.25 / n_seasons),
+        stderr_edge=stderr_edge,
+    )
 
 
 def evaluate_fixed_policy(
@@ -1102,6 +1237,8 @@ def report(
     groups = build_rival_groups(rivals, [me] + rivals, p_fav,
                                 reluctance=reluctance)
     solution = solve_joint(me, rivals, p_fav, groups, countback)
+    sim = simulate_branches(me, rivals, games, p_fav, n_seasons=n_seasons,
+                            seed=seed, reluctance=reluctance, tau=tau)
 
     g0 = games[0]
     fav0, dog0 = fav_names[0], underdog_name(g0)
@@ -1118,12 +1255,26 @@ def report(
     print("Favourite   : %-22s  P(win) = %s   [%s devig]" % (fav0, pct(p_fav[0]), method))
     print("Underdog    : %-22s  P(win) = %s" % (dog0, pct(1.0 - p_fav[0])))
     print()
-    print("  Tip the FAVOURITE (%-18s)  ->  P(win comp) = %s" % (fav0, pct(solution.p_win_favourite)))
-    print("  Tip the UNDERDOG  (%-18s)  ->  P(win comp) = %s" % (dog0, pct(solution.p_win_dog)))
+    print("  Tip the FAVOURITE (%-18s)  ->  P(win comp) = %s" % (fav0, pct(sim.p_win_favourite)))
+    print("  Tip the UNDERDOG  (%-18s)  ->  P(win comp) = %s" % (dog0, pct(sim.p_win_underdog)))
     print()
-    edge = abs(solution.p_win_dog - solution.p_win_favourite)
-    chosen = dog0 if solution.action == "D" else fav0
-    print("  >>> RECOMMENDATION: tip %s   (edge %s)" % (chosen.upper(), pct(edge)))
+    edge = abs(sim.p_win_underdog - sim.p_win_favourite)
+    chosen = dog0 if sim.action == "D" else fav0
+    print("  >>> RECOMMENDATION: tip %s   (edge %s +/- %s)" %
+          (chosen.upper(), pct(edge).strip(), pct(sim.stderr_edge).strip()))
+    print("      From %d simulated seasons, each played BOTH ways over the same draws."
+          % sim.n_seasons)
+    if edge < 2.0 * sim.stderr_edge:
+        print("      *** WARNING: that edge is inside the sampling error. Raise")
+        print("      --sim-seasons before trusting the direction. ***")
+    exact_choice = dog0 if solution.action == "D" else fav0
+    if exact_choice != chosen:
+        print("      *** WARNING: the exact grouped solve prefers %s. The two models"
+              % exact_choice.upper())
+        print("      disagree, so this decision is genuinely marginal. ***")
+    else:
+        print("      The exact grouped solve agrees (%s, %s)."
+              % (exact_choice, pct(solution.p_win).strip()))
     print()
 
     # ---- Why -------------------------------------------------------------------
@@ -1143,11 +1294,10 @@ def report(
                pct_mc(countback.pairwise(j), n_sims)))
     print()
 
-    winners = simulate_seasons(me, rivals, games, p_fav, n_seasons=n_seasons,
-                               seed=seed, reluctance=reluctance, tau=tau)
-    stderr = 100.0 * math.sqrt(0.25 / n_seasons)
+    winners = sim.table
     print(rule())
-    print("WHO WINS THE COMP  (simulated, %d seasons, +/- ~%.2f%%)" % (n_seasons, stderr))
+    print("WHO WINS THE COMP  (same simulation, tipping %s next, +/- ~%.2f%%)"
+          % (chosen, 100.0 * sim.stderr_level))
     print(rule())
     for name, prob in winners:
         marker = "   <-- you" if name == me.name else ""
@@ -1156,17 +1306,15 @@ def report(
     print("    %-18s %s" % ("total", pct(sum(p for _, p in winners))))
     print()
     print("    Each season is played out game by game. Everyone re-decides after")
-    print("    every result, nobody shares a policy, and whoever LEADS AT THAT MOMENT")
-    print("    tips the favourite -- so the role passes around as the lead changes.")
+    print("    every result, nobody shares a policy, and whoever is genuinely WINNING")
+    print("    at that moment tips the favourite -- a tie you would lose on countback")
+    print("    is not winning, so it keeps chasing.")
     print()
-    print("    Your %s here is NOT the headline %s above -- they are different"
-          % (pct(dict(winners)[me.name]).strip(), pct(solution.p_win).strip()))
-    print("    models, and TWO things change at once. This row has you playing the same")
-    print("    level-0 rule as everyone else rather than your exact optimum, which")
-    print("    costs you; but the rivals also change -- the leader role moves with the")
-    print("    lead instead of being fixed on one name, and nobody is locked in step.")
-    print("    Those pull opposite ways, so neither number bounds the other. Trust the")
-    print("    headline for the DECISION; read this table for the shape of the race.")
+    print("    Your row is the headline %s: same simulation, same branch. From game 2"
+          % pct(sim.p_win).strip())
+    print("    on I play the same level-0 rule as everyone else, so this is exact")
+    print("    one-step lookahead over a rollout policy, not a full optimum. The")
+    print("    exact grouped solve is reported alongside as a cross-check.")
     print()
     print("Rival model -- the points leader tips favourites, chasers deviate to close")
     print("the gap (reluctance = %.2f, ASSUMED -- chasers baulk at heavy favourites):"
@@ -1317,6 +1465,12 @@ def report(
     print("  * Rivals are level-0: they play the field, they do not respond to you.")
     print("  * The points leader tips favourites; chasers deviate per their own best")
     print("    response. The leader is read from the board, so scenarios reassign it.")
+    print("  * The next tip is chosen by SIMULATION: every season is played both")
+    print("    ways over the same draws, and the better branch wins. From game 2 on")
+    print("    I play the same level-0 rule as the field, so it is one-step lookahead")
+    print("    over a rollout policy, not a full optimum.")
+    print("  * The sections below the table use the EXACT grouped solve, a different")
+    print("    model. Read them as relative comparisons, not against the headline.")
     print("  * Seed = %d, %d countback sims, %d simulated seasons. Deterministic." %
           (seed, n_sims, n_seasons))
     print(rule("="))
@@ -1333,6 +1487,7 @@ def report(
         "groups": groups,
         "winners": winners,
         "n_seasons": n_seasons,
+        "sim": sim,
     }
 
 
@@ -1352,11 +1507,18 @@ def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
                     "%s v %s" % (games[0].home, games[0].away)])
         w.writerow(["next", "lock_local", games[0].lock_local, ""])
         w.writerow(["next", "favourite", fav_names[0], "%.6f" % p_fav[0]])
-        w.writerow(["next", "p_win_if_favourite", "%.6f" % sol.p_win_favourite, ""])
-        w.writerow(["next", "p_win_if_underdog", "%.6f" % sol.p_win_dog, ""])
+        sim: SimulatedRecommendation = result["sim"]   # type: ignore[assignment]
+        w.writerow(["next", "p_win_if_favourite", "%.6f" % sim.p_win_favourite,
+                    "simulated"])
+        w.writerow(["next", "p_win_if_underdog", "%.6f" % sim.p_win_underdog,
+                    "simulated"])
         w.writerow(["next", "recommended",
+                    fav_names[0] if sim.action == "F" else underdog_name(games[0]),
+                    "edge %.6f +/- %.6f" % (
+                        abs(sim.p_win_underdog - sim.p_win_favourite), sim.stderr_edge)])
+        w.writerow(["next", "recommended_exact_solve",
                     fav_names[0] if sol.action == "F" else underdog_name(games[0]),
-                    "edge %.6f" % abs(sol.p_win_dog - sol.p_win_favourite)])
+                    "cross-check, p_win %.6f" % sol.p_win])
         for label, v in result["baselines"]:      # type: ignore[union-attr]
             w.writerow(["baseline", label, "%.6f" % v, ""])
         w.writerow(["baseline", "this engine", "%.6f" % sol.p_win, "optimal"])

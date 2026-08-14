@@ -95,6 +95,35 @@ keys number in the thousands across a whole run against 20,000 x 17 x 7 lookups,
 the DP still runs a few thousand times rather than millions. Measured cost of the
 whole table at 20,000 seasons: about 3 seconds.
 
+## Choosing the next tip from the simulation
+
+The decision is read off the simulation rather than the exact solve, so the headline
+and the table agree by construction.
+
+Each season is drawn **once** and played **twice**: my next tip forced to the
+favourite, then to the underdog, over identical results and identical margin draws.
+The branch with the higher eventual win rate is the recommendation, and the table
+shown is that branch's table — so my row in it *is* the headline number.
+
+From the second game on I play the same level-0 rule as the field, so this is exact
+one-step lookahead over a rollout policy, not a full optimum.
+
+**The pairing does not reduce variance here — it slightly increases it.** The same
+result that rewards tipping the favourite punishes tipping the dog, so the branches
+come out mildly anti-correlated: measured on the live board, the paired standard
+error on the edge is 0.0049 against 0.0043 for independent sampling. Pairing is kept
+because it answers the actual counterfactual — in *this* season, which choice was
+better — and `stderr_edge` is computed from the realised per-season differences, so
+it reports the true uncertainty instead of understating it with an independence
+formula.
+
+Two warnings fire: when the edge is inside twice its standard error, and when the
+exact grouped solve prefers the other tip.
+
+`solve_joint` still runs. It supplies the cross-check, the contingency table, and
+every sensitivity section, which stay on the exact grouped model and are therefore
+relative comparisons rather than numbers comparable to the headline.
+
 ## Reporting
 
 `--recommend` prints the simulated table, with the count and the standard error, and
