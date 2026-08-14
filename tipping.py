@@ -703,7 +703,7 @@ def simulate_seasons(
     rivals: Sequence[Tipster],
     games: Sequence[Game],
     p_fav: Sequence[float],
-    n_seasons: int = 20_000,
+    n_seasons: int = 60_000,
     seed: int = 20260814,
     reluctance: float = RELUCTANCE,
     tau: float = TAU_TIP,
@@ -1077,7 +1077,7 @@ def report(
     tau: float,
     paths: SetPaths,
     reluctance: float = RELUCTANCE,
-    n_seasons: int = 20_000,
+    n_seasons: int = 60_000,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -1403,7 +1403,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="explicit leaderboard CSV, overriding --set")
     parser.add_argument("--devig", default="odds_ratio",
                         choices=sorted(DEVIG_METHODS), help="devig method (default odds_ratio)")
-    parser.add_argument("--sim-seasons", type=int, default=20_000,
+    parser.add_argument("--sim-seasons", type=int, default=60_000,
                         help="seasons to simulate for the win-probability table")
     parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
                         help="rivals' reluctance to back a heavy underdog "

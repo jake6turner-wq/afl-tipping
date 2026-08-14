@@ -119,7 +119,7 @@ my exact policy.
 `recommendation.csv` gains `winner,<name>,<probability>` rows plus a
 `winner,_seasons,<n>` row recording the sample size.
 
-`--sim-seasons` sets the count, default 20000.
+`--sim-seasons` sets the count, default 60000 (raised from the initial 20000 once the runtime proved cheap).
 
 ## Removed
 

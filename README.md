@@ -96,7 +96,7 @@ simulating the actual margin, which captures the fact that everyone's error is
 measured against the *same* result and so is correlated across rivals.
 
 `--recommend` also prints `WHO WINS THE COMP`, from a separate **season simulation**
-(`--sim-seasons`, default 20000). Each season is played out game by game: everyone
+(`--sim-seasons`, default 60000). Each season is played out game by game: everyone
 re-decides from the live standings after every result, one result is drawn and shared
 by all of them, and whoever leads *at that moment* tips the favourite — so the
 always-favourite role passes around as the lead changes. Nobody shares a policy, so a
