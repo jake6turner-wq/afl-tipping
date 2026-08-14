@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 88 tests, ~5s
+python3 test_tipping.py                       # 93 tests, ~6.5s
 ```
 
 ## Input sets
@@ -112,6 +112,13 @@ re-decides from the live standings after every result, one result is drawn and s
 by all of them, and whoever leads *at that moment* tips the favourite — so the
 always-favourite role passes around as the lead changes. Nobody shares a policy, so a
 rival who decides to chase a run of upsets is making their own choice.
+
+`YOUR NEXT DEVIATION` answers "when do I next tip an underdog, and who". It is a
+**distribution over games**, not a plan: whether you deviate at a given game depends
+on how the results fall before it, so there is no fixed sequence of future tips —
+only a rule that answers the standings. Read the likeliest row as "the next underdog
+you are most likely to need", and the `never deviate` row as the chance you can ride
+favourites home.
 
 Everything below the table — baselines, chaser sensitivity, devig sensitivity, the
 margin-tip sweep — still comes from the exact grouped solve, which is a different

@@ -531,6 +531,46 @@ class TestSimulatedRecommendation(unittest.TestCase):
         self.assertEqual(r.action, "F")
         self.assertGreaterEqual(r.p_win_favourite, r.p_win_underdog)
 
+    def test_first_deviation_is_a_distribution(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(6)]
+        r = self._branches(ME, RIVALS, games)
+        self.assertAlmostEqual(sum(p for _, p in r.first_deviation), 1.0, places=9)
+        for idx, p in r.first_deviation:
+            self.assertTrue(0.0 <= p <= 1.0)
+            self.assertTrue(idx is None or 0 <= idx < len(games))
+
+    def test_it_is_sorted_with_never_reported_separately(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(6)]
+        r = self._branches(ME, RIVALS, games)
+        indices = [idx for idx, _ in r.first_deviation]
+        self.assertEqual(len(indices), len(set(indices)), "one row per outcome")
+        probs = [p for idx, p in r.first_deviation if idx is not None]
+        self.assertEqual(probs, sorted(probs, reverse=True), "likeliest first")
+
+    def test_deviating_now_makes_this_game_the_answer(self):
+        # If the recommendation is to take the dog immediately, the next deviation
+        # is this game, in every season.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(6)]
+        r = self._branches(ME, RIVALS, games)
+        if r.action != "D":
+            self.skipTest("this fixture does not recommend deviating now")
+        self.assertEqual(r.first_deviation[0], (0, 1.0))
+
+    def test_a_runaway_leader_never_needs_to_deviate(self):
+        # So far clear that tipping favourites wins regardless: no deviation.
+        leader = T.Tipster("Jake Turner", 400, 1, is_me=True)
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(5)]
+        r = self._branches(leader, RIVALS, games, n_seasons=800)
+        self.assertAlmostEqual(dict(r.first_deviation).get(None, 0.0), 1.0, places=12)
+
+    def test_a_hopeless_chaser_always_deviates(self):
+        # Miles back with the worse countback: every season needs the dog somewhere.
+        chaser = T.Tipster("Jake Turner", 100, 9999, is_me=True)
+        rivals = [T.Tipster("Runaway", 104, 1)]
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(6)]
+        r = self._branches(chaser, rivals, games, n_seasons=800)
+        self.assertLess(dict(r.first_deviation).get(None, 0.0), 0.05)
+
     def test_it_is_reproducible(self):
         games = [_game("G%d" % i, 1.5, 2.6) for i in range(4)]
         a = self._branches(ME, RIVALS, games, n_seasons=1500, seed=8)

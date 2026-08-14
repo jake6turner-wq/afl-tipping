@@ -124,6 +124,21 @@ exact grouped solve prefers the other tip.
 every sensitivity section, which stay on the exact grouped model and are therefore
 relative comparisons rather than numbers comparable to the headline.
 
+## The next deviation
+
+Every season already records the index of the first game at which I take the
+underdog, so reporting it costs nothing beyond a histogram.
+
+It is deliberately reported as a **distribution over games with a "never" row**, not
+as a single planned game. Whether I deviate at game `g` depends on the standings when
+`g` arrives, which depend on results before it. An earlier version of this engine
+printed a row of the policy table as though it were a sequence of future tips; that
+was wrong, because every entry after the first deviation sits on a delta the tipster
+has just left. There is no plan, only a rule.
+
+Probabilities use `pct_mc`, so a unanimous outcome prints `>99.998%` rather than
+claiming a certainty 60,000 draws cannot support.
+
 ## Reporting
 
 `--recommend` prints the simulated table, with the count and the standard error, and

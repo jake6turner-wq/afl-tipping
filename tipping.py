@@ -716,15 +716,23 @@ def _draw_season(games, p_fav, n_rivals, random_f, gauss, tau, sigma):
 
 def _play_season(games, start_scores, start_errors, results, margins, decide,
                  force_first_me):
-    """Replay one pre-drawn season. Returns (final scores, final margin errors)."""
+    """Replay one pre-drawn season.
+
+    Returns (final scores, final margin errors, index of my first deviation or
+    None). The first-deviation index is per-season because it depends on how the
+    results fall: there is no fixed sequence of future tips, only a rule.
+    """
     scores = list(start_scores)
     errors = list(start_errors)
     n = len(scores)
+    first_deviation = None
 
     for t, game in enumerate(games):
         acts = _actions(scores, errors, t, decide)
         if t == 0 and force_first_me is not None:
             acts[0] = force_first_me
+        if first_deviation is None and acts[0] == "D":
+            first_deviation = t
         fav_won = results[t]
         for i in range(n):
             if (acts[i] == "F") == fav_won:
@@ -736,7 +744,7 @@ def _play_season(games, start_scores, start_errors, results, margins, decide,
             errors[0] += abs(actual - game.line_fav)
             for j in range(1, n):
                 errors[j] += abs(actual - rival_tips[j - 1])
-    return scores, errors
+    return scores, errors, first_deviation
 
 
 def _season_winners(scores, errors):
@@ -762,6 +770,8 @@ class SimulatedRecommendation:
     n_seasons: int
     stderr_level: float                           # on any single probability
     stderr_edge: float                            # on the favourite-minus-dog edge
+    # (game index or None for "never", probability) -- likeliest first, "never" last
+    first_deviation: List[Tuple[Optional[int], float]]
 
 
 def simulate_seasons(
@@ -796,8 +806,8 @@ def simulate_seasons(
     for _ in range(n_seasons):
         results, margins = _draw_season(games, p_fav, n - 1, rng.random, rng.gauss,
                                         tau, sigma)
-        scores, errors = _play_season(games, start_scores, start_errors, results,
-                                      margins, decide, force_first_me)
+        scores, errors, _ = _play_season(games, start_scores, start_errors, results,
+                                         margins, decide, force_first_me)
         contenders = _season_winners(scores, errors)
         share = 1.0 / len(contenders)
         for i in contenders:
@@ -845,6 +855,7 @@ def simulate_branches(
     decide = _decision_cache(p_fav, reluctance, clamp)
     rng = random.Random(seed)
     wins = {"F": [0.0] * n, "D": [0.0] * n}
+    deviations: Dict[str, Dict[Optional[int], int]] = {"F": {}, "D": {}}
     diff_sum = 0.0
     diff_sq = 0.0
 
@@ -853,14 +864,16 @@ def simulate_branches(
                                         tau, sigma)
         mine = {}
         for branch in ("F", "D"):
-            scores, errors = _play_season(games, start_scores, start_errors, results,
-                                          margins, decide, branch)
+            scores, errors, first_dev = _play_season(
+                games, start_scores, start_errors, results, margins, decide, branch)
             contenders = _season_winners(scores, errors)
             share = 1.0 / len(contenders)
             row = wins[branch]
             for i in contenders:
                 row[i] += share
             mine[branch] = share if 0 in contenders else 0.0
+            hist = deviations[branch]
+            hist[first_dev] = hist.get(first_dev, 0) + 1
         d = mine["F"] - mine["D"]
         diff_sum += d
         diff_sq += d * d
@@ -879,6 +892,14 @@ def simulate_branches(
     stderr_edge = math.sqrt(variance / n_seasons)
 
     action = "D" if p_d > p_f else "F"
+
+    # Likeliest first, with "never" (None) held back to the end of the list.
+    hist = deviations[action]
+    first_deviation = sorted(
+        ((idx, count / n_seasons) for idx, count in hist.items()),
+        key=lambda row: (row[0] is None, -row[1], row[0] if row[0] is not None else 0),
+    )
+
     return SimulatedRecommendation(
         action=action,
         p_win=max(p_f, p_d),
@@ -890,6 +911,7 @@ def simulate_branches(
         n_seasons=n_seasons,
         stderr_level=math.sqrt(0.25 / n_seasons),
         stderr_edge=stderr_edge,
+        first_deviation=first_deviation,
     )
 
 
@@ -1316,6 +1338,38 @@ def report(
     print("    one-step lookahead over a rollout policy, not a full optimum. The")
     print("    exact grouped solve is reported alongside as a cross-check.")
     print()
+    print(rule())
+    print("YOUR NEXT DEVIATION  (when you first tip an underdog, same seasons)")
+    print(rule())
+    never = 0.0
+    shown = 0
+    for idx, prob in sim.first_deviation:
+        if idx is None:
+            never = prob
+            continue
+        if shown >= 5 or prob < 0.005:
+            continue
+        gm = games[idx]
+        print("    %-7s %-30s tip %-18s %s" %
+              (gm.game_id, "%s v %s" % (gm.home, gm.away),
+               underdog_name(gm), pct_mc(prob, sim.n_seasons)))
+        shown += 1
+    print("    %-7s %-30s %-22s %s" %
+          ("", "never deviate", "", pct_mc(never, sim.n_seasons)))
+    print()
+    likeliest = next(((i, p) for i, p in sim.first_deviation if i is not None), None)
+    if likeliest is None:
+        print("    You never need to take an underdog in any simulated season.")
+    else:
+        gm = games[likeliest[0]]
+        print("    Likeliest next underdog: %s in %s (%s v %s), on %s of seasons." %
+              (underdog_name(gm), gm.game_id, gm.home, gm.away,
+               pct_mc(likeliest[1], sim.n_seasons).strip()))
+    print()
+    print("    This is a DISTRIBUTION, not a plan. Whether you deviate at a given")
+    print("    game depends on how the results fall before it, so there is no fixed")
+    print("    sequence of future tips -- only a rule that answers the standings.")
+    print()
     print("Rival model -- the points leader tips favourites, chasers deviate to close")
     print("the gap (reluctance = %.2f, ASSUMED -- chasers baulk at heavy favourites):"
           % reluctance)
@@ -1528,6 +1582,12 @@ def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
             w.writerow(["margin", "%+.0f" % tip, "%.6f" % v, "line%+d" % offset])
         cb: CountbackModel = result["countback"]  # type: ignore[assignment]
         w.writerow(["winner", "_seasons", str(result["n_seasons"]), "simulated seasons"])
+        for idx, prob in sim.first_deviation:
+            if idx is None:
+                w.writerow(["deviation", "never", "%.6f" % prob, ""])
+            else:
+                w.writerow(["deviation", games[idx].game_id, "%.6f" % prob,
+                            "tip %s" % underdog_name(games[idx])])
         for name, prob in result["winners"]:      # type: ignore[union-attr]
             w.writerow(["winner", name, "%.6f" % prob,
                         "P(finishes first), simulated"])
