@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 78 tests, ~2.4s
+python3 test_tipping.py                       # 77 tests, ~1.2s
 ```
 
 ## Input sets
@@ -95,14 +95,19 @@ A tie for first goes to the lowest cumulative margin error, so the terminal valu
 simulating the actual margin, which captures the fact that everyone's error is
 measured against the *same* result and so is correlated across rivals.
 
-`--recommend` also prints `WHO WINS THE COMP`: every tipster's probability of
-finishing first in one shared world, where each plays their own best response. It is
-a real distribution and sums to 100%, and your row equals the headline exactly.
+`--recommend` also prints `WHO WINS THE COMP`, from a separate **season simulation**
+(`--sim-seasons`, default 20000). Each season is played out game by game: everyone
+re-decides from the live standings after every result, one result is drawn and shared
+by all of them, and whoever leads *at that moment* tips the favourite — so the
+always-favourite role passes around as the lead changes. Nobody shares a policy, so a
+rival who decides to chase a run of upsets is making their own choice.
 
-Read the marked rows carefully. Rivals with identical policies are collapsed onto one
-delta dimension, so the engine has them tipping alike for the rest of the season and
-their order frozen at today's points — anyone sharing a group with a higher-pointed
-rival shows 0% by construction, not by form.
+Your row there will not match the headline `P(win comp)`. They are different models
+and two things differ at once: the simulation has you playing the same level-0 rule as
+everyone else rather than your exact optimum, which costs you, while the rivals gain a
+moving leader role and lose their forced lockstep, which here helps you. Neither
+number bounds the other. **The headline drives the tip; the table shows the shape of
+the race.**
 
 ## Read the output critically
 
@@ -116,10 +121,12 @@ rival shows 0% by construction, not by form.
   the field is frozen and stops deviating once they're far enough ahead, which
   flatters you. `CHASER MODEL SENSITIVITY` reports the relentless variants; check
   the recommended action is stable across them.
-- **Rivals sharing a policy are perfectly correlated.** Collapsing them onto one
-  delta assumes they tip identically all season, which freezes their relative order.
-  It is harmless for your own number — what matters is whether *any* of them beats
-  you — but it makes the per-person split inside a group meaningless.
+- **The tip recommendation still groups rivals.** `solve_joint` must: ungrouped, its
+  state is seven independent deltas, around `41^7` nodes against the ~26 the grouped
+  version reaches. Only the win-probability table is ungrouped.
+- **A rival's margin error can matter more than their tipping.** NRL > AFL reaches the
+  top score in about half of all simulated seasons and wins none of them: he is never
+  there alone, and the worst margin error in the field loses every countback.
 - **Rivals don't respond to you.** No equilibrium solve, so the engine can't tell you
   how the leader would counter your deviation. That matters at the last game or two
   and essentially nowhere before.

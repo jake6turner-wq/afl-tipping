@@ -14,13 +14,13 @@ Usage:
     python3 tipping.py --recommend --explain
     python3 tipping.py --recommend --set scenario   # run against a sandbox set
     python3 tipping.py --copy-set scenario          # reset the sandbox
+    python3 tipping.py --recommend --sim-seasons 100000   # tighter win-probabilities
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-from array import array
 import math
 import os
 import random
@@ -240,10 +240,6 @@ class CountbackModel:
         self.tau, self.sigma, self.n_sims, self.seed = tau, sigma, n_sims, seed
         self._counts = [0] * (1 << self.n) if self.n else [0]
         self._pairwise = [0.0] * self.n
-        # Flat n_sims x (n + 1) block of simulated final errors, index 0 = me.
-        # Retained so ties that do NOT involve me can still be resolved.
-        self._errors = array("d")
-        self._winner_cache: Dict[Tuple[int, ...], List[float]] = {}
         self._simulate()
 
     def _simulate(self) -> None:
@@ -254,8 +250,6 @@ class CountbackModel:
         base_me = float(self.me.margin_error)
         base_rivals = [float(r.margin_error) for r in self.rivals]
         gauss = rng.gauss
-        errors = array("d", bytes(8 * self.n_sims * (n + 1)))
-        row = 0
 
         for _ in range(self.n_sims):
             err_me = base_me
@@ -272,11 +266,6 @@ class CountbackModel:
                     pair[j] += 1
             counts[mask] += 1
 
-            errors[row] = err_me
-            for j in range(n):
-                errors[row + 1 + j] = err[j]
-            row += n + 1
-
         # P(I beat every rival in S) = fraction of sims whose mask is a superset of S.
         total = [0] * (1 << n)
         for mask in range(1 << n):
@@ -291,7 +280,6 @@ class CountbackModel:
                 sub = (sub - 1) & mask
         self._counts = total
         self._pairwise = [p / self.n_sims for p in pair]
-        self._errors = errors
 
     def subset_prob(self, indices: Tuple[int, ...]) -> float:
         if not indices:
@@ -303,37 +291,6 @@ class CountbackModel:
 
     def pairwise(self, index: int) -> float:
         return self._pairwise[index]
-
-    def winner_probs(self, members: Tuple[int, ...]) -> List[float]:
-        """P(each member holds the lowest cumulative margin error of the set).
-
-        Unified indexing: 0 is me, 1..n are the rivals in order. Unlike
-        `subset_prob`, this resolves ties that do not involve me at all, which is
-        what reporting every tipster's win probability requires.
-        """
-        if not members:
-            return []
-        if len(members) == 1:
-            return [1.0]
-        key = tuple(members)
-        cached = self._winner_cache.get(key)
-        if cached is not None:
-            return cached
-
-        stride = self.n + 1
-        wins = [0] * len(key)
-        errors = self._errors
-        for base in range(0, self.n_sims * stride, stride):
-            best_at, best = 0, errors[base + key[0]]
-            for pos in range(1, len(key)):
-                e = errors[base + key[pos]]
-                if e < best:
-                    best_at, best = pos, e
-            wins[best_at] += 1
-
-        probs = [w / self.n_sims for w in wins]
-        self._winner_cache[key] = probs
-        return probs
 
 
 def pairwise_countback_static(a: Tipster, b: Tipster) -> float:
@@ -391,7 +348,11 @@ def solve_level0(
             lo = max(-clamp, d - 1) + clamp
             hi = min(clamp, d + 1) + clamp
             v_dog = p * nxt[lo] + (1.0 - p) * nxt[hi]
-            if v_dog > v_fav + penalty + 1e-12:
+            # Reluctance is an aversion to backing a longshot, not a death wish: it
+            # must never make a tipster prefer a CERTAIN loss to a live chance. With
+            # nothing left to protect there is nothing to be reluctant about.
+            floor = penalty if v_fav > 0.0 else 0.0
+            if v_dog > v_fav + floor + 1e-12:
                 values[t][i], policy[t][i] = v_dog, "D"
             else:
                 values[t][i], policy[t][i] = v_fav, "F"
@@ -636,100 +597,144 @@ def solve_joint(
     )
 
 
-def shared_policy_blockers(
-    rivals: Sequence[Tipster],
-    groups: Sequence[RivalGroup],
-) -> Dict[str, str]:
-    """Rivals who cannot finish first because of the policy GROUPING, not the odds.
+# --------------------------------------------------------------------------------
+# Ungrouped season simulation
+#
+# Every tipster is tracked individually and re-decides after each result. Nobody is
+# collapsed onto a shared policy, so a rival who decides to chase a run of upsets is
+# making their own choice rather than inheriting a group's.
+# --------------------------------------------------------------------------------
 
-    Rivals with identical policies are collapsed onto one delta dimension, which
-    assumes they tip identically for the rest of the season. Their relative order is
-    therefore frozen at today's points, and anyone sharing a group with a
-    higher-pointed member can never overtake them.
+def _decision_cache(p_fav: Sequence[float], reluctance: float, clamp: int):
+    """Build the cached 'should I take the dog' lookup for a non-leading tipster.
 
-    That is an artefact of a computational optimisation, not a fact about the comp,
-    so the affected rows are marked rather than reported as plain zeros. Returns
-    {blocked rival name: the same-group rival permanently ahead of them}.
+    A non-leader believes the rest of the field tips favourites from here, so their
+    whole decision reduces to (games remaining, deficit to the lead, what the
+    countback would do if they drew level). Every non-leader at a given game shares
+    the same set of leaders, so the key space is tiny and the DP runs a few hundred
+    times across a whole run rather than millions.
     """
-    blocked: Dict[str, str] = {}
-    for group in groups:
-        members = [rivals[m] for m in group.members]
-        if len(members) < 2:
-            continue
-        best = max(members, key=lambda r: r.points)
-        for r in members:
-            if r.points < best.points:
-                blocked[r.name] = best.name
-    return blocked
+    cache: Dict[Tuple[int, int, float], str] = {}
+
+    def action(t: int, need: int, countback: float) -> str:
+        key = (t, need, countback)
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+
+        def terminal(delta: int) -> float:
+            if delta > need:
+                return 1.0            # clear of the lead outright
+            if delta == need:
+                return countback      # level with the lead: the tiebreak decides
+            return 0.0
+
+        _, policy = solve_level0(p_fav[t:], terminal, clamp=clamp,
+                                 reluctance=reluctance)
+        result = policy[0][clamp]     # their delta is 0 as of right now
+        cache[key] = result
+        return result
+
+    return action
 
 
-def winner_probabilities(
+def simulated_actions(
     me: Tipster,
     rivals: Sequence[Tipster],
+    games: Sequence[Game],
     p_fav: Sequence[float],
-    groups: Sequence[RivalGroup],
-    countback: CountbackModel,
-    solution: Solution,
+    scores: Sequence[int],
+    errors: Sequence[float],
+    t: int,
+    reluctance: float = RELUCTANCE,
+    clamp: int = DELTA_CLAMP,
+) -> List[str]:
+    """Every tipster's action at game `t` given the live standings. Index 0 is me.
+
+    Whoever currently leads tips the favourite. The lead is read fresh every game, so
+    the role moves around the field as the season plays out.
+    """
+    return _actions(scores, errors, t, _decision_cache(p_fav, reluctance, clamp))
+
+
+def _actions(scores, errors, t, decide) -> List[str]:
+    top = max(scores)
+    leaders = [i for i, s in enumerate(scores) if s == top]
+    best_leader_error = min(errors[i] for i in leaders)
+
+    acts = []
+    for i, score in enumerate(scores):
+        if score == top:
+            acts.append("F")          # leading: freeze the board
+            continue
+        # Belief about the tiebreak if they draw level with the current leaders,
+        # from the margin errors accumulated so far in this very season.
+        if errors[i] < best_leader_error:
+            countback = 1.0
+        elif errors[i] > best_leader_error:
+            countback = 0.0
+        else:
+            countback = 0.5
+        acts.append(decide(t, top - score, countback))
+    return acts
+
+
+def simulate_seasons(
+    me: Tipster,
+    rivals: Sequence[Tipster],
+    games: Sequence[Game],
+    p_fav: Sequence[float],
+    n_seasons: int = 20_000,
+    seed: int = 20260814,
+    reluctance: float = RELUCTANCE,
+    tau: float = TAU_TIP,
+    sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
 ) -> List[Tuple[str, float]]:
-    """Every tipster's P(finish first) in ONE shared world, descending.
+    """Play the rest of the season out `n_seasons` times; return P(finish first).
 
-    Forward propagation of the same policies the backward solve produced: my action
-    from `solution.action_at`, each rival group's from its own level-0 policy. The
-    reachable state space is tiny -- every tipster tips the same games, so two
-    players only separate when they disagree, and then by exactly 1.
-
-    Because it replays the identical policies, my entry must equal
-    `solution.p_win`. That reconciliation is asserted in the tests.
+    Each season steps game by game. Every tipster picks their action from the live
+    standings, ONE result is drawn and shared by all of them -- they are tipping the
+    same match -- and everyone who was right scores a point. Margin games accumulate
+    real error, so the countback at the end is decided rather than modelled.
     """
-    n_games = len(p_fav)
-    n_groups = len(groups)
-    group_of = {m: gi for gi, g in enumerate(groups) for m in g.members}
-
-    def clamp_d(d: int) -> int:
-        return max(-clamp, min(clamp, d))
-
-    # state -> probability mass, where state is (my delta, per-group deltas)
-    dist: Dict[Tuple[int, Tuple[int, ...]], float] = {
-        (0, tuple(0 for _ in range(n_groups))): 1.0
-    }
-
-    for t in range(n_games):
-        p = p_fav[t]
-        nxt: Dict[Tuple[int, Tuple[int, ...]], float] = {}
-        for (delta_me, group_deltas), mass in dist.items():
-            my_action = solution.action_at(t, delta_me, group_deltas)[0] \
-                if solution.action_at is not None else "F"
-            acts = [
-                "F" if g.policy is None
-                else g.policy[t][clamp_d(group_deltas[gi]) + clamp]
-                for gi, g in enumerate(groups)
-            ]
-            for fav_won, weight in ((True, p), (False, 1.0 - p)):
-                move = -1 if fav_won else 1
-                key = (
-                    clamp_d(delta_me + (move if my_action == "D" else 0)),
-                    tuple(clamp_d(group_deltas[gi] + (move if acts[gi] == "D" else 0))
-                          for gi in range(n_groups)),
-                )
-                nxt[key] = nxt.get(key, 0.0) + mass * weight
-        dist = nxt
-
-    # Terminal: score is points + delta, since the favourites term cancels for all.
-    totals = [0.0] * (len(rivals) + 1)
-    for (delta_me, group_deltas), mass in dist.items():
-        if mass <= 0.0:
-            continue
-        scores = [me.points + delta_me]
-        for j, r in enumerate(rivals):
-            scores.append(r.points + group_deltas[group_of[j]])
-        best = max(scores)
-        tied = tuple(i for i, s in enumerate(scores) if s == best)
-        for pos, share in zip(tied, countback.winner_probs(tied)):
-            totals[pos] += mass * share
-
     names = [me.name] + [r.name for r in rivals]
-    table = list(zip(names, totals))
+    start_scores = [me.points] + [r.points for r in rivals]
+    start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
+    n = len(names)
+
+    decide = _decision_cache(p_fav, reluctance, clamp)
+    rng = random.Random(seed)
+    random_f, gauss = rng.random, rng.gauss
+    wins = [0.0] * n
+
+    for _ in range(n_seasons):
+        scores = list(start_scores)
+        errors = list(start_errors)
+
+        for t, game in enumerate(games):
+            acts = _actions(scores, errors, t, decide)
+            fav_won = random_f() < p_fav[t]
+            for i in range(n):
+                if (acts[i] == "F") == fav_won:
+                    scores[i] += 1
+            if game.is_margin_game and game.line_fav is not None:
+                actual = gauss(game.line_fav, sigma)
+                # I tip the line; the median minimises E|M - m|. Rivals scatter.
+                errors[0] += abs(actual - game.line_fav)
+                for j in range(1, n):
+                    errors[j] += abs(actual - gauss(game.line_fav, tau))
+
+        top = max(scores)
+        contenders = [i for i in range(n) if scores[i] == top]
+        if len(contenders) > 1:
+            best = min(errors[i] for i in contenders)
+            contenders = [i for i in contenders if errors[i] == best]
+        share = 1.0 / len(contenders)
+        for i in contenders:
+            wins[i] += share
+
+    table = [(names[i], wins[i] / n_seasons) for i in range(n)]
     table.sort(key=lambda row: (-row[1], row[0]))
     return table
 
@@ -1053,6 +1058,7 @@ def report(
     tau: float,
     paths: SetPaths,
     reluctance: float = RELUCTANCE,
+    n_seasons: int = 20_000,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -1118,32 +1124,30 @@ def report(
                pct_mc(countback.pairwise(j), n_sims)))
     print()
 
-    winners = winner_probabilities(me, rivals, p_fav, groups, countback, solution)
+    winners = simulate_seasons(me, rivals, games, p_fav, n_seasons=n_seasons,
+                               seed=seed, reluctance=reluctance, tau=tau)
+    stderr = 100.0 * math.sqrt(0.25 / n_seasons)
     print(rule())
-    print("WHO WINS THE COMP  (everyone playing their best response, one shared world)")
+    print("WHO WINS THE COMP  (simulated, %d seasons, +/- ~%.2f%%)" % (n_seasons, stderr))
     print(rule())
-    blocked = shared_policy_blockers(rivals, groups)
     for name, prob in winners:
-        if name == me.name:
-            marker = "   <-- you"
-        elif name in blocked:
-            marker = "   (shares a policy with %s, who is ahead)" % blocked[name]
-        else:
-            marker = ""
+        marker = "   <-- you" if name == me.name else ""
         print("    %-18s %s%s" % (name, pct(prob), marker))
     print("    %-18s %s" % ("", "-" * 7))
     print("    %-18s %s" % ("total", pct(sum(p for _, p in winners))))
     print()
-    print("    Every row is that tipster's own best response, so this is one world and")
-    print("    the column is a real distribution. Two caveats: the leader's number is")
-    print("    his probability UNDER THE ALWAYS-FAVOURITE INSTRUCTION, not the best he")
-    print("    could do; and no rival responds to you.")
-    if blocked:
-        print()
-        print("    Marked rivals are zero by CONSTRUCTION, not by form: rivals with the")
-        print("    same policy share one delta, so the engine has them tipping alike all")
-        print("    season and their order frozen at today's points. Read those rows as")
-        print("    'cannot be separated from their group', not as 'no chance'.")
+    print("    Each season is played out game by game. Everyone re-decides after")
+    print("    every result, nobody shares a policy, and whoever LEADS AT THAT MOMENT")
+    print("    tips the favourite -- so the role passes around as the lead changes.")
+    print()
+    print("    Your %s here is NOT the headline %s above -- they are different"
+          % (pct(dict(winners)[me.name]).strip(), pct(solution.p_win).strip()))
+    print("    models, and TWO things change at once. This row has you playing the same")
+    print("    level-0 rule as everyone else rather than your exact optimum, which")
+    print("    costs you; but the rivals also change -- the leader role moves with the")
+    print("    lead instead of being fixed on one name, and nobody is locked in step.")
+    print("    Those pull opposite ways, so neither number bounds the other. Trust the")
+    print("    headline for the DECISION; read this table for the shape of the race.")
     print()
     print("Rival model -- the points leader tips favourites, chasers deviate to close")
     print("the gap (reluctance = %.2f, ASSUMED -- chasers baulk at heavy favourites):"
@@ -1294,7 +1298,8 @@ def report(
     print("  * Rivals are level-0: they play the field, they do not respond to you.")
     print("  * The points leader tips favourites; chasers deviate per their own best")
     print("    response. The leader is read from the board, so scenarios reassign it.")
-    print("  * Seed = %d, %d countback sims. Deterministic given this seed." % (seed, n_sims))
+    print("  * Seed = %d, %d countback sims, %d simulated seasons. Deterministic." %
+          (seed, n_sims, n_seasons))
     print(rule("="))
     print()
 
@@ -1308,6 +1313,7 @@ def report(
         "countback": countback,
         "groups": groups,
         "winners": winners,
+        "n_seasons": n_seasons,
     }
 
 
@@ -1340,11 +1346,10 @@ def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
         for tip, offset, v in result["margin_rows"]:   # type: ignore[union-attr]
             w.writerow(["margin", "%+.0f" % tip, "%.6f" % v, "line%+d" % offset])
         cb: CountbackModel = result["countback"]  # type: ignore[assignment]
-        blocked = shared_policy_blockers(rivals, result["groups"])  # type: ignore[arg-type]
+        w.writerow(["winner", "_seasons", str(result["n_seasons"]), "simulated seasons"])
         for name, prob in result["winners"]:      # type: ignore[union-attr]
             w.writerow(["winner", name, "%.6f" % prob,
-                        "shares policy with %s, who is ahead" % blocked[name]
-                        if name in blocked else "P(finishes first), one shared world"])
+                        "P(finishes first), simulated"])
         for j, r in enumerate(rivals):
             w.writerow(["countback", r.name, "%.6f" % cb.pairwise(j),
                         "margin gap %+d" % (r.margin_error - me.margin_error)])
@@ -1379,6 +1384,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="explicit leaderboard CSV, overriding --set")
     parser.add_argument("--devig", default="odds_ratio",
                         choices=sorted(DEVIG_METHODS), help="devig method (default odds_ratio)")
+    parser.add_argument("--sim-seasons", type=int, default=20_000,
+                        help="seasons to simulate for the win-probability table")
     parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
                         help="rivals' reluctance to back a heavy underdog "
                              "(default %.2f, 0 = pure expected value)" % RELUCTANCE)
@@ -1419,7 +1426,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     result = report(me, rivals, games, args.devig, args.explain,
-                    args.sims, args.seed, args.tau, paths, args.reluctance)
+                    args.sims, args.seed, args.tau, paths, args.reluctance,
+                    args.sim_seasons)
     out = write_csv_outputs(me, rivals, games, result, args.devig, paths)
     print("Wrote %s" % out)
     return 0

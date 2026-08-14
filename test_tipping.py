@@ -320,144 +320,110 @@ class TestInputValidation(unittest.TestCase):
             T.load_fixtures("/nonexistent/fixtures.csv")
 
 
-class TestCountbackWinner(unittest.TestCase):
-    """Who holds the lowest margin error among a tied set. Index 0 is me."""
-
-    def _cb(self, n_sims=20000):
-        return T.CountbackModel(ME, RIVALS, [25.0, 25.0], tau=T.TAU_TIP,
-                                n_sims=n_sims, seed=3)
-
-    def test_a_lone_member_wins_outright(self):
-        for who in (0, 1, 4):
-            self.assertEqual(self._cb().winner_probs((who,)), [1.0])
-
-    def test_a_tied_set_is_a_distribution(self):
-        probs = self._cb().winner_probs((0, 2, 3))
-        self.assertEqual(len(probs), 3)
-        self.assertAlmostEqual(sum(probs), 1.0, places=9)
-        for p in probs:
-            self.assertTrue(0.0 <= p <= 1.0)
-
-    def test_the_sharper_margin_error_wins_more_often(self):
-        # Index 0 is me on 573; index 2 is NRL > AFL on 677, the worst in the field.
-        me_p, them_p = self._cb().winner_probs((0, 2))
-        self.assertGreater(me_p, them_p)
-
-    def test_it_agrees_with_the_existing_pairwise_number(self):
-        # winner_probs((0, j+1))[0] is P(I beat rival j), which pairwise(j) already
-        # answers. Same simulation, so they must agree closely.
-        cb = self._cb(n_sims=40000)
-        for j in range(len(RIVALS)):
-            self.assertAlmostEqual(cb.winner_probs((0, j + 1))[0], cb.pairwise(j),
-                                   places=9, msg=RIVALS[j].name)
+def _game(gid, home_odds, away_odds, margin=False, line=25.0):
+    return T.Game(gid, "R", "", "Home", "Away", home_odds, away_odds, line, margin)
 
 
-class TestWinnerProbabilities(unittest.TestCase):
-    """Every tipster's P(finish first) in one shared world."""
+class TestSeasonSimulation(unittest.TestCase):
+    """Ungrouped Monte Carlo: everyone decides again after every result."""
 
-    def _solve(self, p_fav):
-        groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, p_fav)
-        cb = T.CountbackModel(ME, RIVALS, [25.0, 25.0], tau=T.TAU_TIP,
-                              n_sims=20000, seed=5)
-        sol = T.solve_joint(ME, RIVALS, p_fav, groups, cb)
-        table = T.winner_probabilities(ME, RIVALS, p_fav, groups, cb, sol)
-        return sol, table
+    def _sim(self, me, rivals, games, n_seasons=4000, seed=11):
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        return dict(T.simulate_seasons(me, rivals, games, p_fav,
+                                       n_seasons=n_seasons, seed=seed))
 
     def test_it_is_a_probability_distribution(self):
-        _, table = self._solve([0.7] * 8)
-        self.assertAlmostEqual(sum(p for _, p in table), 1.0, places=9)
-        for _, p in table:
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(6)]
+        table = self._sim(ME, RIVALS, games)
+        self.assertAlmostEqual(sum(table.values()), 1.0, places=9)
+        for p in table.values():
             self.assertTrue(0.0 <= p <= 1.0)
 
     def test_every_tipster_appears_exactly_once(self):
-        _, table = self._solve([0.7] * 8)
-        names = sorted(name for name, _ in table)
-        self.assertEqual(names, sorted([ME.name] + [r.name for r in RIVALS]))
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(4)]
+        table = self._sim(ME, RIVALS, games)
+        self.assertEqual(sorted(table), sorted([ME.name] + [r.name for r in RIVALS]))
 
-    def test_my_row_reconciles_with_the_headline(self):
-        # The backward solve and a forward propagation of the same policies must
-        # agree exactly -- any pair's gap moves by at most 1 per game.
-        for p_fav in ([0.7] * 8, [0.62] * 12, [0.55, 0.8, 0.66, 0.9, 0.7, 0.6]):
-            sol, table = self._solve(p_fav)
-            mine = dict(table)[ME.name]
-            self.assertAlmostEqual(mine, sol.p_win, places=12)
-
-    def test_an_uncatchable_leader_wins_outright(self):
-        # Two games left, but the leader is 5 clear: nobody can reach them.
-        runaway = T.Tipster("Runaway", ME.points + 5, 900)
-        rivals = [runaway]
-        p_fav = [0.7, 0.7]
-        groups = T.build_rival_groups(rivals, [ME] + rivals, p_fav)
-        cb = T.CountbackModel(ME, rivals, [25.0, 25.0], tau=T.TAU_TIP,
-                              n_sims=2000, seed=5)
-        sol = T.solve_joint(ME, rivals, p_fav, groups, cb)
-        table = dict(T.winner_probabilities(ME, rivals, p_fav, groups, cb, sol))
+    def test_an_uncatchable_leader_wins_every_season(self):
+        runaway = T.Tipster("Runaway", ME.points + 9, 900)
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(3)]
+        table = self._sim(ME, [runaway], games, n_seasons=500)
         self.assertAlmostEqual(table["Runaway"], 1.0, places=12)
-        self.assertAlmostEqual(table[ME.name], 0.0, places=12)
 
-    # A single CERTAIN game is the degenerate case the engine actually supports:
-    # deviating can only lose a point, so the standings are already decided.
-    # (An empty fixture is unreachable -- load_fixtures rejects it.)
+    def test_identical_rivals_get_identical_probabilities(self):
+        # The grouped model could not do this: equal points AND equal margin error
+        # must give equal chances, up to sampling error.
+        twins = [T.Tipster("Twin A", 150, 500), T.Tipster("Twin B", 150, 500)]
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(6)]
+        table = self._sim(ME, twins, games, n_seasons=6000)
+        self.assertAlmostEqual(table["Twin A"], table["Twin B"], delta=0.03)
 
-    def _decided(self, rival):
-        rivals = [rival]
-        p_fav = [1.0]
-        groups = T.build_rival_groups(rivals, [ME] + rivals, p_fav)
-        cb = T.CountbackModel(ME, rivals, [25.0], tau=T.TAU_TIP, n_sims=2000, seed=5)
-        sol = T.solve_joint(ME, rivals, p_fav, groups, cb)
-        return dict(T.winner_probabilities(ME, rivals, p_fav, groups, cb, sol))
+    def test_a_rival_behind_a_twin_can_still_win(self):
+        # THE POINT OF THE CHANGE. Under grouping, a rival sharing a policy with a
+        # higher-pointed twin was exactly 0. Now they chase on their own account.
+        ahead = T.Tipster("Ahead", 148, 600)
+        behind = T.Tipster("Behind", 147, 600)
+        games = [_game("G%d" % i, 1.7, 2.2) for i in range(8)]
+        table = self._sim(ME, [ahead, behind], games, n_seasons=6000)
+        self.assertGreater(table["Behind"], 0.0,
+                           "a lower-pointed rival must have a real chance")
 
-    def test_a_decided_fixture_gives_everything_to_the_leader(self):
-        table = self._decided(T.Tipster("Ahead", ME.points + 1, 900))
-        self.assertAlmostEqual(table["Ahead"], 1.0, places=12)
-        self.assertAlmostEqual(table[ME.name], 0.0, places=12)
+    def test_the_current_leader_tips_favourites(self):
+        # One game, all-but-certain favourite, and the leader is only 1 clear. A
+        # chaser must take the dog (their only path) while the leader must not.
+        leader = T.Tipster("Leader", ME.points + 1, 900)
+        games = [_game("G0", 1.01, 30.0)]
+        p_fav = [T.favourite_prob(games[0], "odds_ratio")[0]]
+        acts = T.simulated_actions(ME, [leader], games, p_fav,
+                                   scores=[ME.points, leader.points],
+                                   errors=[float(ME.margin_error), 900.0], t=0)
+        self.assertEqual(acts[1], "F", "the leader must tip the favourite")
+        self.assertEqual(acts[0], "D", "a chaser one back must take its only chance")
 
-    def test_a_decided_tie_resolves_on_the_countback(self):
-        # Level on points, but my 573 beats their 900 on every simulated margin.
-        table = self._decided(T.Tipster("Blunt", ME.points, 900))
-        self.assertAlmostEqual(table[ME.name], 1.0, places=12)
-        self.assertAlmostEqual(table["Blunt"], 0.0, places=12)
+    def test_the_leader_rule_follows_the_lead_changing(self):
+        # Same two tipsters, but now I am the one in front: the roles must swap.
+        # The chaser needs the sharper margin error, otherwise drawing level loses
+        # the countback and no tip can save them -- see the test below.
+        chaser = T.Tipster("Chaser", ME.points - 1, 100)
+        games = [_game("G0", 1.01, 30.0)]
+        p_fav = [T.favourite_prob(games[0], "odds_ratio")[0]]
+        acts = T.simulated_actions(ME, [chaser], games, p_fav,
+                                   scores=[ME.points, chaser.points],
+                                   errors=[float(ME.margin_error), 100.0], t=0)
+        self.assertEqual(acts[0], "F", "I now lead, so I tip the favourite")
+        self.assertEqual(acts[1], "D", "the chaser must deviate")
 
+    def test_a_chaser_who_loses_the_countback_anyway_does_not_bother(self):
+        # One game back with the WORSE margin error: drawing level loses the
+        # tiebreak, and one game cannot put them two clear. Nothing helps.
+        chaser = T.Tipster("Doomed", ME.points - 1, 900)
+        games = [_game("G0", 1.01, 30.0)]
+        p_fav = [T.favourite_prob(games[0], "odds_ratio")[0]]
+        acts = T.simulated_actions(ME, [chaser], games, p_fav,
+                                   scores=[ME.points, chaser.points],
+                                   errors=[float(ME.margin_error), 900.0], t=0)
+        self.assertEqual(acts[1], "F")
 
-class TestSharedPolicyBlockers(unittest.TestCase):
-    """Rivals sharing a policy share one delta, freezing their relative order."""
+    def test_the_same_seed_reproduces_the_table(self):
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(5)]
+        a = self._sim(ME, RIVALS, games, n_seasons=2000, seed=42)
+        b = self._sim(ME, RIVALS, games, n_seasons=2000, seed=42)
+        self.assertEqual(a, b)
 
-    def test_the_lower_pointed_sharer_is_flagged(self):
-        p_fav = [0.7] * 10
-        groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, p_fav)
-        blocked = T.shared_policy_blockers(RIVALS, groups)
-        # Whoever is flagged must share a group with the named blocker, and the
-        # blocker must genuinely be ahead on points.
-        by_name = {r.name: r for r in RIVALS}
-        for name, blocker in blocked.items():
-            self.assertGreater(by_name[blocker].points, by_name[name].points)
-            same = [g for g in groups
-                    if {name, blocker} <= {RIVALS[m].name for m in g.members}]
-            self.assertEqual(len(same), 1, "%s and %s must share a group" % (name, blocker))
+    def test_different_seeds_agree_within_sampling_error(self):
+        games = [_game("G%d" % i, 1.5, 2.6) for i in range(6)]
+        a = self._sim(ME, RIVALS, games, n_seasons=8000, seed=1)
+        b = self._sim(ME, RIVALS, games, n_seasons=8000, seed=2)
+        for name in a:
+            self.assertAlmostEqual(a[name], b[name], delta=0.03, msg=name)
 
-    def test_a_solo_group_is_never_flagged(self):
-        p_fav = [0.7] * 10
-        groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, p_fav)
-        blocked = T.shared_policy_blockers(RIVALS, groups)
-        for group in groups:
-            if len(group.members) == 1:
-                self.assertNotIn(RIVALS[group.members[0]].name, blocked)
-
-    def test_a_flagged_rival_really_cannot_win(self):
-        p_fav = [0.7] * 10
-        groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, p_fav)
-        cb = T.CountbackModel(ME, RIVALS, [25.0, 25.0], tau=T.TAU_TIP,
-                              n_sims=5000, seed=5)
-        sol = T.solve_joint(ME, RIVALS, p_fav, groups, cb)
-        table = dict(T.winner_probabilities(ME, RIVALS, p_fav, groups, cb, sol))
-        for name in T.shared_policy_blockers(RIVALS, groups):
-            self.assertAlmostEqual(table[name], 0.0, places=12, msg=name)
-
-    def test_equal_points_in_one_group_blocks_nobody(self):
-        rivals = [T.Tipster("A", 145, 500), T.Tipster("B", 145, 600)]
-        p_fav = [0.7] * 6
-        groups = T.build_rival_groups(rivals, [ME] + rivals, p_fav)
-        self.assertEqual(T.shared_policy_blockers(rivals, groups), {})
+    def test_margin_games_break_ties_on_accumulated_error(self):
+        # Level on points with one certain favourite left: nobody can separate on
+        # tips, so the sharper margin tipper must take it on the countback.
+        blunt = T.Tipster("Blunt", ME.points, 5000)
+        games = [_game("G0", 1.0001, 5000.0, margin=True)]
+        table = self._sim(ME, [blunt], games, n_seasons=500)
+        self.assertGreater(table[ME.name], 0.95)
 
 
 class TestDeviationReluctance(unittest.TestCase):
@@ -496,6 +462,21 @@ class TestDeviationReluctance(unittest.TestCase):
                     "at k=%s it deviates at %.2f but skips %.2f" % (
                         k, min(deviating), max(skipped)),
                 )
+
+    def test_reluctance_never_prefers_a_certain_loss_to_a_live_chance(self):
+        # One game, a 98% favourite, and the dog is the ONLY path to first. The
+        # penalty (0.048) exceeds the dog's value (0.018), so an unguarded additive
+        # rule would take the certain loss. It must not.
+        _, policy = T.solve_level0([0.982], lambda d: 1.0 if d >= 1 else 0.0,
+                                   reluctance=T.RELUCTANCE)
+        self.assertEqual(policy[0][T.DELTA_CLAMP], "D")
+
+    def test_reluctance_still_bites_when_there_is_something_to_protect(self):
+        # Same heavy favourite, but now standing pat already wins outright, so the
+        # tipster has a live alternative and reluctance should hold them back.
+        _, policy = T.solve_level0([0.982], lambda d: 1.0 if d >= 0 else 0.0,
+                                   reluctance=T.RELUCTANCE)
+        self.assertEqual(policy[0][T.DELTA_CLAMP], "F")
 
     def test_a_coin_flip_game_is_never_penalised(self):
         # penalty = k * max(0, p - 0.5), so p = 0.5 costs nothing at any k.
