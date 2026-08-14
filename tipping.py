@@ -25,6 +25,7 @@ import os
 import random
 import shutil
 import sys
+import textwrap
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -76,6 +77,7 @@ FIXTURES_CSV = os.path.join(INPUT_DIR, DEFAULT_SET, "fixtures.csv")
 SIGMA_MARGIN = 37.0   # SD of actual margin around the line
 TAU_TIP = 10.0        # SD of tipsters' margin tips around the line (ASSUMED, not fitted)
 DELTA_CLAMP = 20      # |delta| never needs to exceed the number of remaining games
+RELUCTANCE = 0.10     # rivals' reluctance to back a heavy underdog (ASSUMED, not fitted)
 
 
 # --------------------------------------------------------------------------------
@@ -314,8 +316,19 @@ def solve_level0(
     p_fav: Sequence[float],
     terminal: Callable[[int], float],
     clamp: int = DELTA_CLAMP,
+    reluctance: float = 0.0,
 ) -> Tuple[List[List[float]], List[List[str]]]:
-    """Exact DP. Returns (values, policy); index delta as [t][delta + clamp]."""
+    """Exact DP. Returns (values, policy); index delta as [t][delta + clamp].
+
+    `reluctance` scales a penalty the deviation edge must clear before the dog is
+    taken: `reluctance * max(0, p - 0.5)`. It is zero at a coin flip and largest at
+    a certainty, which is what makes a modelled tipster deviate in close games and
+    baulk at heavy favourites. At 0.0 this is the plain expected-value DP.
+
+    The penalty selects the ACTION only. The value stored is always the true value
+    of whichever action was chosen, never the penalised one -- everything
+    downstream reads these as real win probabilities.
+    """
     n = len(p_fav)
     size = 2 * clamp + 1
     values = [[0.0] * size for _ in range(n + 1)]
@@ -327,13 +340,14 @@ def solve_level0(
     for t in range(n - 1, -1, -1):
         p = p_fav[t]
         nxt = values[t + 1]
+        penalty = reluctance * max(0.0, p - 0.5)
         for d in range(-clamp, clamp + 1):
             i = d + clamp
             v_fav = nxt[i]
             lo = max(-clamp, d - 1) + clamp
             hi = min(clamp, d + 1) + clamp
             v_dog = p * nxt[lo] + (1.0 - p) * nxt[hi]
-            if v_dog > v_fav + 1e-12:
+            if v_dog > v_fav + penalty + 1e-12:
                 values[t][i], policy[t][i] = v_dog, "D"
             else:
                 values[t][i], policy[t][i] = v_fav, "F"
@@ -402,10 +416,16 @@ def build_rival_groups(
     p_fav: Sequence[float],
     leader_tips_favourites: bool = True,
     my_assumed_gain: int = 0,
+    reluctance: float = RELUCTANCE,
 ) -> List[RivalGroup]:
     """Solve each rival's level-0 policy, then group rivals whose policies match.
 
-    Per user instruction: the leader tips favourites, the chasers do not.
+    Per user instruction: whoever currently leads on points tips favourites, the
+    chasers do not. The leader is read from the board, so editing a scenario's
+    leaderboard reassigns the role.
+
+    `reluctance` makes the chasers baulk at heavy favourites -- see solve_level0.
+    It applies to RIVALS only; my own policy stays an exact optimum against them.
     """
     leader_points = max(t.points for t in all_tipsters)
     my_name = next((t.name for t in all_tipsters if t.is_me), None)
@@ -420,7 +440,8 @@ def build_rival_groups(
         else:
             others = [t for t in all_tipsters if t.name != rival.name]
             _, policy = solve_level0(
-                p_fav, rival_terminal(rival, others, my_name, my_assumed_gain)
+                p_fav, rival_terminal(rival, others, my_name, my_assumed_gain),
+                reluctance=reluctance,
             )
             signature = tuple(tuple(row) for row in policy)
 
@@ -835,6 +856,40 @@ def rule(char: str = "-", width: int = 78) -> str:
     return char * width
 
 
+def standings_summary(me: Tipster, rivals: Sequence[Tipster]) -> str:
+    """Where I actually stand, derived rather than asserted.
+
+    The real post-R22 board has me one point back holding the lowest margin error,
+    but a scenario set can put me level, in front, or behind someone with a better
+    margin error. Every clause here is checked before it is printed.
+    """
+    leader = max(rivals, key=lambda r: r.points)
+    gap = leader.points - me.points
+    if gap > 0:
+        standing = "You trail %s by %d point(s)" % (leader.name, gap)
+    elif gap == 0:
+        level = sorted(r.name for r in rivals if r.points == me.points)
+        standing = "You are level on points with %s" % ", ".join(level)
+    else:
+        standing = "You lead %s by %d point(s)" % (leader.name, -gap)
+
+    sharper = [r for r in rivals if r.margin_error < me.margin_error]
+    if not sharper:
+        text = (
+            "%s and hold the lowest margin error in the field (%d), so a tie for "
+            "first is a win for you against every current rival."
+            % (standing, me.margin_error)
+        )
+    else:
+        best = min(sharper, key=lambda r: r.margin_error)
+        text = (
+            "%s. Your margin error is %d, but %s is on %d, so a tie for first would "
+            "LOSE the countback to them -- you need to finish outright ahead."
+            % (standing, me.margin_error, best.name, best.margin_error)
+        )
+    return textwrap.fill(text, width=78)
+
+
 def set_banner(paths: SetPaths) -> str:
     """The header lines identifying which world this run describes."""
     lines = ["Input set   : %s" % paths.name,
@@ -855,6 +910,7 @@ def report(
     seed: int,
     tau: float,
     paths: SetPaths,
+    reluctance: float = RELUCTANCE,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -876,7 +932,8 @@ def report(
     countback = CountbackModel(
         me, rivals, margin_lines, tau=tau, n_sims=n_sims, seed=seed
     )
-    groups = build_rival_groups(rivals, [me] + rivals, p_fav)
+    groups = build_rival_groups(rivals, [me] + rivals, p_fav,
+                                reluctance=reluctance)
     solution = solve_joint(me, rivals, p_fav, groups, countback)
 
     g0 = games[0]
@@ -906,12 +963,7 @@ def report(
     print(rule())
     print("WHY")
     print(rule())
-    gaps = {r.name: r.points - me.points for r in rivals}
-    leader = max(rivals, key=lambda r: r.points)
-    print("You trail %s by %d point(s) and hold the lowest margin error in the field" %
-          (leader.name, gaps[leader.name]))
-    print("(%d v %d), so a tie for first is a win for you against every current rival." %
-          (me.margin_error, leader.margin_error))
+    print(standings_summary(me, rivals))
     print()
     print("Every rival's score is (their points + F), where F is however many favourites")
     print("win -- the same F for everyone. F cancels, so only DIFFERENTIALS matter:")
@@ -923,7 +975,9 @@ def report(
               (r.name, r.margin_error - me.margin_error,
                pct_mc(countback.pairwise(j), n_sims)))
     print()
-    print("Rival model -- leader tips favourites, chasers deviate to close the gap:")
+    print("Rival model -- the points leader tips favourites, chasers deviate to close")
+    print("the gap (reluctance = %.2f, ASSUMED -- chasers baulk at heavy favourites):"
+          % reluctance)
     for gi, group in enumerate(groups):
         names = ", ".join(rivals[m].name for m in group.members)
         if group.policy is None:
@@ -985,7 +1039,8 @@ def report(
     for label, gain in (("satisficing (pure level-0)", 0),
                         ("relentless (expects you at +1)", 1),
                         ("relentless (expects you at +2)", 2)):
-        grp = build_rival_groups(rivals, [me] + rivals, p_fav, my_assumed_gain=gain)
+        grp = build_rival_groups(rivals, [me] + rivals, p_fav,
+                                 my_assumed_gain=gain, reluctance=reluctance)
         sol = solve_joint(me, rivals, p_fav, grp, countback)
         chaser_rows.append((label, gain, sol.p_win, sol.action))
         marker = "   <-- headline" if gain == 0 else ""
@@ -1006,7 +1061,8 @@ def report(
     sens_rows = []
     for m in ("proportional", "odds_ratio", "shin"):
         pf = [favourite_prob(g, m)[0] for g in games]
-        grp = build_rival_groups(rivals, [me] + rivals, pf)
+        grp = build_rival_groups(rivals, [me] + rivals, pf,
+                                 reluctance=reluctance)
         sol = solve_joint(me, rivals, pf, grp, countback)
         actions[m] = sol.action
         sens_rows.append((m, pf[0], sol.p_win, sol.action))
@@ -1063,8 +1119,11 @@ def report(
     print("ASSUMPTIONS  (see docs/superpowers/specs/ for the full list)")
     print(rule("="))
     print("  * tau = %.0f is ASSUMED, not fitted. Fill past rounds' margin tips to measure it." % tau)
+    print("  * reluctance = %.2f is ASSUMED, not fitted. It is how much extra win" % reluctance)
+    print("    probability a chaser needs before backing a heavy underdog.")
     print("  * Rivals are level-0: they play the field, they do not respond to you.")
-    print("  * Leader tips favourites; chasers deviate per their own best response.")
+    print("  * The points leader tips favourites; chasers deviate per their own best")
+    print("    response. The leader is read from the board, so scenarios reassign it.")
     print("  * Seed = %d, %d countback sims. Deterministic given this seed." % (seed, n_sims))
     print(rule("="))
     print()
@@ -1144,6 +1203,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="explicit leaderboard CSV, overriding --set")
     parser.add_argument("--devig", default="odds_ratio",
                         choices=sorted(DEVIG_METHODS), help="devig method (default odds_ratio)")
+    parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
+                        help="rivals' reluctance to back a heavy underdog "
+                             "(default %.2f, 0 = pure expected value)" % RELUCTANCE)
     parser.add_argument("--tau", type=float, default=TAU_TIP,
                         help="SD of rivals' margin tips around the line (default %.0f)" % TAU_TIP)
     parser.add_argument("--sims", type=int, default=100_000, help="countback Monte Carlo draws")
@@ -1181,7 +1243,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     result = report(me, rivals, games, args.devig, args.explain,
-                    args.sims, args.seed, args.tau, paths)
+                    args.sims, args.seed, args.tau, paths, args.reluctance)
     out = write_csv_outputs(me, rivals, games, result, args.devig, paths)
     print("Wrote %s" % out)
     return 0

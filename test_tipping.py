@@ -262,9 +262,13 @@ class TestChaserModel(unittest.TestCase):
     """The pure level-0 chaser satisfices and self-caps, which flatters me. The
     my_assumed_gain knob models a chaser who expects me to be chasing too."""
 
+    # These probe the policy at t=0, so they set reluctance=0 to isolate the
+    # my_assumed_gain mechanism. With reluctance on, a chaser facing 18 games of
+    # slack simply waits, and t=0 is uniformly "F" whatever the assumed gain.
+
     def test_satisficing_chasers_stop_deviating_once_they_are_far_enough_ahead(self):
         groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, _flat_fixture(),
-                                      my_assumed_gain=0)
+                                      my_assumed_gain=0, reluctance=0.0)
         chaser = [g for g in groups if g.policy is not None][0]
         # There must exist a delta at which they switch to the favourite and stop.
         actions = [chaser.policy[0][d + T.DELTA_CLAMP] for d in range(-2, 6)]
@@ -275,7 +279,7 @@ class TestChaserModel(unittest.TestCase):
         # so their deviation region must extend at least as far.
         def stop_point(gain):
             groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, _flat_fixture(),
-                                          my_assumed_gain=gain)
+                                          my_assumed_gain=gain, reluctance=0.0)
             chaser = [g for g in groups if g.policy is not None][0]
             deltas = [d for d in range(-4, 8)
                       if chaser.policy[0][d + T.DELTA_CLAMP] == "D"]
@@ -314,6 +318,111 @@ class TestInputValidation(unittest.TestCase):
     def test_missing_fixtures_file_is_a_clear_error(self):
         with self.assertRaises(T.InputError):
             T.load_fixtures("/nonexistent/fixtures.csv")
+
+
+class TestDeviationReluctance(unittest.TestCase):
+    """Rivals should take dogs readily in close games and rarely in lopsided ones."""
+
+    # A chaser needing ground, over a fixture mixing close and lopsided games.
+    FIXTURE = [0.55, 0.70, 0.85, 0.96, 0.60, 0.78]
+
+    def _chaser_policy(self, reluctance):
+        target = lambda d: 1.0 if d >= 2 else 0.0
+        _, policy = T.solve_level0(self.FIXTURE, target, reluctance=reluctance)
+        return [policy[t][0 + T.DELTA_CLAMP] for t in range(len(self.FIXTURE))]
+
+    def test_zero_reluctance_reproduces_todays_policy(self):
+        _, baseline = T.solve_level0(self.FIXTURE, lambda d: 1.0 if d >= 2 else 0.0)
+        _, explicit = T.solve_level0(self.FIXTURE, lambda d: 1.0 if d >= 2 else 0.0,
+                                     reluctance=0.0)
+        self.assertEqual(baseline, explicit)
+
+    def test_reluctance_never_increases_deviation(self):
+        counts = [self._chaser_policy(k).count("D") for k in (0.0, 0.1, 0.3, 0.8)]
+        for earlier, later in zip(counts, counts[1:]):
+            self.assertLessEqual(later, earlier, "more reluctance must not deviate more")
+        self.assertLess(counts[-1], counts[0], "high reluctance must deviate strictly less")
+
+    def test_heavy_favourites_are_dropped_before_close_games(self):
+        # Raise reluctance until deviation first disappears somewhere. The game it
+        # abandons first must not be a closer game than one it still deviates in.
+        for k in (0.05, 0.1, 0.2, 0.4, 0.8):
+            actions = self._chaser_policy(k)
+            deviating = [self.FIXTURE[t] for t, a in enumerate(actions) if a == "D"]
+            skipped = [self.FIXTURE[t] for t, a in enumerate(actions) if a == "F"]
+            if deviating and skipped:
+                self.assertLessEqual(
+                    min(deviating), max(skipped) + 1e-12,
+                    "at k=%s it deviates at %.2f but skips %.2f" % (
+                        k, min(deviating), max(skipped)),
+                )
+
+    def test_a_coin_flip_game_is_never_penalised(self):
+        # penalty = k * max(0, p - 0.5), so p = 0.5 costs nothing at any k.
+        even = [0.5, 0.5, 0.5]
+        target = lambda d: 1.0 if d >= 1 else 0.0
+        _, base = T.solve_level0(even, target, reluctance=0.0)
+        _, harsh = T.solve_level0(even, target, reluctance=5.0)
+        self.assertEqual(base, harsh)
+
+    def test_values_stay_real_probabilities(self):
+        # The penalty selects the action; it must not leak into the stored value.
+        values, _ = T.solve_level0(self.FIXTURE, lambda d: 1.0 if d >= 2 else 0.0,
+                                   reluctance=0.5)
+        for row in values:
+            for v in row:
+                self.assertTrue(0.0 <= v <= 1.0, "value %r is not a probability" % v)
+
+    def test_reluctance_reaches_the_rival_groups(self):
+        p_fav = [0.55, 0.62, 0.88, 0.95, 0.60, 0.72, 0.66, 0.90]
+
+        def deviations(reluctance):
+            groups = T.build_rival_groups(RIVALS, [ME] + RIVALS, p_fav,
+                                          reluctance=reluctance)
+            chasers = [g for g in groups if g.policy is not None]
+            return sum(
+                sum(1 for t in range(len(p_fav))
+                    if g.policy[t][T.DELTA_CLAMP] == "D")
+                for g in chasers
+            )
+
+        self.assertLess(deviations(0.8), deviations(0.0))
+
+    def test_default_reluctance_is_documented_and_nonzero(self):
+        self.assertGreater(T.RELUCTANCE, 0.0)
+        self.assertLess(T.RELUCTANCE, 1.0)
+
+
+class TestStandingsNarrative(unittest.TestCase):
+    """The WHY text must derive the standings, not assert them."""
+
+    def test_trailing_is_reported_as_trailing(self):
+        text = T.standings_summary(ME, RIVALS)
+        self.assertIn("trail", text)
+        self.assertIn("Ryan Board", text)
+
+    def test_leading_is_not_reported_as_a_negative_deficit(self):
+        leader = T.Tipster("Jake Turner", 200, 573, is_me=True)
+        text = T.standings_summary(leader, RIVALS)
+        self.assertNotIn("-", text)
+        self.assertIn("lead", text)
+
+    def test_a_tie_at_the_top_is_reported_as_level(self):
+        tied = T.Tipster("Jake Turner", 147, 573, is_me=True)
+        text = T.standings_summary(tied, RIVALS)
+        self.assertIn("level", text)
+
+    def test_the_margin_error_claim_is_checked_not_asserted(self):
+        # Give a rival a better margin error than mine; the text must not claim
+        # that a tie for first is a win for me against every rival.
+        rivals = [T.Tipster("Sharp", 147, 100)]
+        text = T.standings_summary(ME, rivals)
+        self.assertNotIn("lowest margin error", text)
+        self.assertIn("Sharp", text)
+
+    def test_the_margin_error_claim_is_made_when_it_holds(self):
+        text = T.standings_summary(ME, RIVALS)
+        self.assertIn("lowest margin error", text)
 
 
 class TestInputSets(unittest.TestCase):

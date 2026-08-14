@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 52 tests, ~0.7s
+python3 test_tipping.py                       # 64 tests, ~0.7s
 ```
 
 ## Input sets
@@ -46,8 +46,8 @@ for that one file. Overriding exactly one of the two prints a warning, because i
 pairs a leaderboard from one world with fixtures from another.
 
 Useful flags: `--devig {proportional,odds_ratio,shin}` (default `odds_ratio`),
-`--tau` (rival margin-tip dispersion), `--sims`, `--seed`, `--fixtures`,
-`--leaderboard`.
+`--tau` (rival margin-tip dispersion), `--reluctance` (rivals' aversion to heavy
+underdogs), `--sims`, `--seed`, `--set`, `--fixtures`, `--leaderboard`.
 
 ## Filling in `inputs/current/fixtures.csv`
 
@@ -77,10 +77,18 @@ everyone, so it cancels. `delta` is your net points versus tipping every favouri
 alongside everyone else cannot change your position, which is why *always favourite*
 scores exactly 0%.
 
-Rivals are modelled as level-0 players maximising their own `P(first)`. The leader
-tips favourites (per instruction); chasers deviate to close the gap. Rivals sharing a
-policy share a DP dimension. My policy is exact backward induction over
-`(game, my delta, each rival group's delta)`.
+Rivals are modelled as level-0 players maximising their own `P(first)`. Whoever
+currently leads on points tips favourites; chasers deviate to close the gap. The
+leader is read from the board, so editing a scenario's leaderboard reassigns the
+role. Rivals sharing a policy share a DP dimension. My policy is exact backward
+induction over `(game, my delta, each rival group's delta)`.
+
+Chasers are not pure expected-value maximisers: `--reluctance` (default `0.10`) is
+how much extra win probability one needs before backing a heavy underdog, scaled by
+price as `reluctance x (p_fav - 0.5)`. At `0` a chaser takes a 15.00 outsider as
+readily as a coin flip; at `0.10` they deviate in the 58-76% games and leave the
+85%+ games alone. It applies to rivals only, so your own recommendation stays an
+exact optimum against them.
 
 A tie for first goes to the lowest cumulative margin error, so the terminal value is
 `P(I win the countback against everyone tied with me)` — a 64-entry table built by
@@ -92,6 +100,9 @@ measured against the *same* result and so is correlated across rivals.
 - **`tau = 10` is assumed, not fitted.** It is the dispersion of rivals' margin tips
   around the line, inferred from a single round's 28-point error spread. Filling in
   past rounds' margin tips would measure it.
+- **`reluctance = 0.10` is assumed, not fitted.** It was calibrated to separate the
+  85%+ games from the 58-76% band on this fixture, not measured from anyone's actual
+  tipping. Sweep it with `--reluctance` and check the recommendation holds.
 - **The chaser model moves the answer by ~7 points.** A pure level-0 chaser believes
   the field is frozen and stops deviating once they're far enough ahead, which
   flatters you. `CHASER MODEL SENSITIVITY` reports the relentless variants; check
