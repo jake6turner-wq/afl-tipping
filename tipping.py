@@ -642,9 +642,9 @@ TEMPLATE_FIXTURES_HEADER = [
 ]
 
 
-def write_template() -> None:
-    os.makedirs(INPUT_DIR, exist_ok=True)
-    with open(LEADERBOARD_CSV, "w", newline="") as fh:
+def write_template(paths: SetPaths) -> None:
+    os.makedirs(os.path.dirname(paths.leaderboard), exist_ok=True)
+    with open(paths.leaderboard, "w", newline="") as fh:
         csv.writer(fh).writerows(TEMPLATE_LEADERBOARD)
 
     rows = [TEMPLATE_FIXTURES_HEADER]
@@ -654,11 +654,11 @@ def write_template() -> None:
                 "%sG%d" % (rnd, g), rnd, "", "", "", "", "", "",
                 "1" if g == 1 else "0", "",
             ])
-    with open(FIXTURES_CSV, "w", newline="") as fh:
+    with open(paths.fixtures, "w", newline="") as fh:
         csv.writer(fh).writerows(rows)
 
-    print("Wrote %s" % LEADERBOARD_CSV)
-    print("Wrote %s" % FIXTURES_CSV)
+    print("Wrote %s" % paths.leaderboard)
+    print("Wrote %s" % paths.fixtures)
     print()
     print("Fill in fixtures.csv, one row per remaining game, IN LOCK ORDER:")
     print("  home / away        team names")
@@ -667,7 +667,8 @@ def write_template() -> None:
     print("  is_margin_game     1 for the first game of each round, else 0")
     print("  p_home_override    optional; your own model's P(home win), beats the devig")
     print()
-    print("Delete rows for games already played. Then: python3 tipping.py --recommend")
+    print("Delete rows for games already played. Then: python3 tipping.py --recommend --set %s"
+          % paths.name)
 
 
 def _num(value: str, field: str, row: int, path: str, cast=float):

@@ -338,6 +338,20 @@ class TestInputSets(unittest.TestCase):
             with self.assertRaises(T.InputError, msg=bad):
                 T.resolve_set(bad)
 
+    def test_template_writes_into_the_named_set(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = T.resolve_set("sandbox", input_dir=tmp, output_dir=tmp)
+            T.write_template(paths)
+            me, rivals = T.load_leaderboard(paths.leaderboard)
+            self.assertTrue(me.is_me)
+            self.assertEqual(len(rivals), 6)
+            # The fixture template is deliberately unfilled, so loading must fail
+            # with the message telling you to fill it in.
+            with self.assertRaises(T.InputError) as ctx:
+                T.load_fixtures(paths.fixtures)
+            self.assertIn("no completed rows", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
