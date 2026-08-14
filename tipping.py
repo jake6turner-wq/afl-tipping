@@ -21,6 +21,7 @@ import csv
 import math
 import os
 import random
+import shutil
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
@@ -669,6 +670,34 @@ def write_template(paths: SetPaths) -> None:
     print()
     print("Delete rows for games already played. Then: python3 tipping.py --recommend --set %s"
           % paths.name)
+
+
+def copy_set(source: SetPaths, dest: SetPaths, force: bool = False,
+             confirm: Callable[[str], str] = input) -> List[str]:
+    """Clone `source` over `dest`, prompting before destroying existing edits.
+
+    Returns the paths written, or an empty list if the user declined. `confirm`
+    is injected so the prompt can be exercised in tests.
+    """
+    if source.name == dest.name:
+        raise InputError("cannot copy set %r onto itself" % source.name)
+    for path in (source.leaderboard, source.fixtures):
+        if not os.path.exists(path):
+            raise InputError(
+                "source set %r is incomplete: %s not found" % (source.name, path)
+            )
+
+    dest_dir = os.path.dirname(dest.leaderboard)
+    existing = [p for p in (dest.leaderboard, dest.fixtures) if os.path.exists(p)]
+    if existing and not force:
+        answer = confirm("Overwrite %s from set %r? [y/N] " % (dest_dir, source.name))
+        if answer.strip().lower() not in ("y", "yes"):
+            return []
+
+    os.makedirs(dest_dir, exist_ok=True)
+    shutil.copyfile(source.leaderboard, dest.leaderboard)
+    shutil.copyfile(source.fixtures, dest.fixtures)
+    return [dest.leaderboard, dest.fixtures]
 
 
 def _num(value: str, field: str, row: int, path: str, cast=float):

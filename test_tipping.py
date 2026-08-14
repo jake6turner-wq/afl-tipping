@@ -352,6 +352,72 @@ class TestInputSets(unittest.TestCase):
                 T.load_fixtures(paths.fixtures)
             self.assertIn("no completed rows", str(ctx.exception))
 
+    def _seeded_pair(self, tmp):
+        """A populated source set and an empty dest set inside tmp."""
+        src = T.resolve_set("current", input_dir=tmp, output_dir=tmp)
+        dst = T.resolve_set("scenario", input_dir=tmp, output_dir=tmp)
+        T.write_template(src)
+        return src, dst
+
+    def test_copy_set_clones_both_files(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = self._seeded_pair(tmp)
+            written = T.copy_set(src, dst)
+            self.assertEqual(written, [dst.leaderboard, dst.fixtures])
+            with open(src.leaderboard) as a, open(dst.leaderboard) as b:
+                self.assertEqual(a.read(), b.read())
+
+    def test_copy_set_refuses_a_missing_source(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src = T.resolve_set("current", input_dir=tmp, output_dir=tmp)
+            dst = T.resolve_set("scenario", input_dir=tmp, output_dir=tmp)
+            with self.assertRaises(T.InputError) as ctx:
+                T.copy_set(src, dst)
+            self.assertIn("current", str(ctx.exception))
+
+    def test_copy_set_refuses_to_copy_onto_itself(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src, _ = self._seeded_pair(tmp)
+            with self.assertRaises(T.InputError):
+                T.copy_set(src, src)
+
+    def test_copy_set_will_not_clobber_without_confirmation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = self._seeded_pair(tmp)
+            T.copy_set(src, dst)
+            with open(dst.fixtures, "w") as fh:
+                fh.write("hand-edited\n")
+            written = T.copy_set(src, dst, confirm=lambda prompt: "n")
+            self.assertEqual(written, [])
+            with open(dst.fixtures) as fh:
+                self.assertEqual(fh.read(), "hand-edited\n", "declining must not overwrite")
+
+    def test_copy_set_clobbers_when_confirmed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = self._seeded_pair(tmp)
+            T.copy_set(src, dst)
+            with open(dst.fixtures, "w") as fh:
+                fh.write("hand-edited\n")
+            self.assertTrue(T.copy_set(src, dst, confirm=lambda prompt: "y"))
+            with open(dst.fixtures) as fh:
+                self.assertNotEqual(fh.read(), "hand-edited\n")
+
+    def test_copy_set_force_skips_the_prompt(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = self._seeded_pair(tmp)
+            T.copy_set(src, dst)
+
+            def explode(prompt):
+                raise AssertionError("--force must not prompt")
+
+            self.assertTrue(T.copy_set(src, dst, force=True, confirm=explode))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
