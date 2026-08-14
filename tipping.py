@@ -30,8 +30,44 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(HERE, "inputs")
 OUTPUT_DIR = os.path.join(HERE, "output")
 
-LEADERBOARD_CSV = os.path.join(INPUT_DIR, "leaderboard.csv")
-FIXTURES_CSV = os.path.join(INPUT_DIR, "fixtures.csv")
+DEFAULT_SET = "current"
+
+
+@dataclass(frozen=True)
+class SetPaths:
+    """Every path belonging to one named input set.
+
+    A set pairs exactly one leaderboard with one fixture list, so the two can
+    never be mixed across sets by accident.
+    """
+    name: str
+    leaderboard: str
+    fixtures: str
+    output_dir: str
+
+
+def resolve_set(name: str,
+                input_dir: Optional[str] = None,
+                output_dir: Optional[str] = None) -> "SetPaths":
+    """Build the paths for set `name`. Pure: touches no filesystem."""
+    if not name or os.sep in name or (os.altsep and os.altsep in name) \
+            or name in (".", "..") or os.path.isabs(name):
+        raise InputError(
+            "invalid set name %r: use a plain directory name such as 'current' "
+            "or 'scenario'" % name
+        )
+    ind = INPUT_DIR if input_dir is None else input_dir
+    outd = OUTPUT_DIR if output_dir is None else output_dir
+    return SetPaths(
+        name=name,
+        leaderboard=os.path.join(ind, name, "leaderboard.csv"),
+        fixtures=os.path.join(ind, name, "fixtures.csv"),
+        output_dir=os.path.join(outd, name),
+    )
+
+
+LEADERBOARD_CSV = os.path.join(INPUT_DIR, DEFAULT_SET, "leaderboard.csv")
+FIXTURES_CSV = os.path.join(INPUT_DIR, DEFAULT_SET, "fixtures.csv")
 
 # Margin model constants. See docs/.../design.md "Margin countback model".
 SIGMA_MARGIN = 37.0   # SD of actual margin around the line

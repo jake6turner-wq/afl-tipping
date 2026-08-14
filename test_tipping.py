@@ -316,5 +316,28 @@ class TestInputValidation(unittest.TestCase):
             T.load_fixtures("/nonexistent/fixtures.csv")
 
 
+class TestInputSets(unittest.TestCase):
+    def test_resolve_builds_input_and_output_paths(self):
+        p = T.resolve_set("scenario", input_dir="/in", output_dir="/out")
+        self.assertEqual(p.name, "scenario")
+        self.assertEqual(p.leaderboard, "/in/scenario/leaderboard.csv")
+        self.assertEqual(p.fixtures, "/in/scenario/fixtures.csv")
+        self.assertEqual(p.output_dir, "/out/scenario")
+
+    def test_resolve_defaults_to_the_project_directories(self):
+        p = T.resolve_set(T.DEFAULT_SET)
+        self.assertEqual(p.leaderboard, T.LEADERBOARD_CSV)
+        self.assertEqual(p.fixtures, T.FIXTURES_CSV)
+
+    def test_default_set_is_current(self):
+        self.assertEqual(T.DEFAULT_SET, "current")
+        self.assertTrue(T.LEADERBOARD_CSV.endswith("inputs/current/leaderboard.csv"))
+
+    def test_set_name_may_not_escape_the_inputs_directory(self):
+        for bad in ("../secrets", "a/b", "", "."):
+            with self.assertRaises(T.InputError, msg=bad):
+                T.resolve_set(bad)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
