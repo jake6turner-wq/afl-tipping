@@ -418,6 +418,35 @@ class TestInputSets(unittest.TestCase):
 
             self.assertTrue(T.copy_set(src, dst, force=True, confirm=explode))
 
+    def test_explicit_paths_override_the_set(self):
+        paths, _ = T.effective_paths("scenario", "/tmp/lb.csv", "/tmp/fx.csv")
+        self.assertEqual(paths.leaderboard, "/tmp/lb.csv")
+        self.assertEqual(paths.fixtures, "/tmp/fx.csv")
+        self.assertTrue(paths.output_dir.endswith("scenario"),
+                        "output still belongs to the named set")
+
+    def test_no_override_leaves_the_set_paths_alone(self):
+        paths, warnings = T.effective_paths("scenario", None, None)
+        self.assertEqual(paths, T.resolve_set("scenario"))
+        self.assertEqual(warnings, [])
+
+    def test_overriding_exactly_one_path_warns(self):
+        _, warnings = T.effective_paths("current", "/tmp/lb.csv", None)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("/tmp/lb.csv", warnings[0])
+        self.assertIn("fixtures", warnings[0])
+
+    def test_overriding_both_paths_does_not_warn(self):
+        _, warnings = T.effective_paths("current", "/tmp/lb.csv", "/tmp/fx.csv")
+        self.assertEqual(warnings, [])
+
+    def test_scenario_banner_fires_for_non_default_sets(self):
+        self.assertIn("NOT REALITY", T.set_banner(T.resolve_set("scenario")))
+        self.assertIn("scenario", T.set_banner(T.resolve_set("scenario")))
+
+    def test_no_scenario_banner_for_the_current_set(self):
+        self.assertNotIn("NOT REALITY", T.set_banner(T.resolve_set(T.DEFAULT_SET)))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

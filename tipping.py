@@ -9,9 +9,11 @@ game that locks -- and what is P(finish first) under each option?
 Pure standard library. No numpy, no pandas, no openpyxl.
 
 Usage:
-    python3 tipping.py --make-template     # write inputs/*.csv for you to fill
+    python3 tipping.py --make-template     # write inputs/current/*.csv to fill
     python3 tipping.py --recommend         # solve and print the next decision
     python3 tipping.py --recommend --explain
+    python3 tipping.py --recommend --set scenario   # run against a sandbox set
+    python3 tipping.py --copy-set scenario          # reset the sandbox
 """
 
 from __future__ import annotations
@@ -700,6 +702,39 @@ def copy_set(source: SetPaths, dest: SetPaths, force: bool = False,
     return [dest.leaderboard, dest.fixtures]
 
 
+def effective_paths(set_name: str,
+                    leaderboard: Optional[str],
+                    fixtures: Optional[str]) -> Tuple[SetPaths, List[str]]:
+    """Resolve `set_name`, then apply any explicit per-file overrides.
+
+    Overriding exactly one of the two pairs a leaderboard from one world with a
+    fixture list from another, which is silently wrong rather than an error --
+    so it returns a warning the caller must print.
+    """
+    paths = resolve_set(set_name)
+    warnings: List[str] = []
+    if leaderboard and not fixtures:
+        warnings.append(
+            "--leaderboard %s overrides set %r, but --fixtures does not: "
+            "still reading fixtures from %s" % (leaderboard, set_name, paths.fixtures)
+        )
+    elif fixtures and not leaderboard:
+        warnings.append(
+            "--fixtures %s overrides set %r, but --leaderboard does not: "
+            "still reading the leaderboard from %s"
+            % (fixtures, set_name, paths.leaderboard)
+        )
+    return (
+        SetPaths(
+            name=paths.name,
+            leaderboard=leaderboard or paths.leaderboard,
+            fixtures=fixtures or paths.fixtures,
+            output_dir=paths.output_dir,
+        ),
+        warnings,
+    )
+
+
 def _num(value: str, field: str, row: int, path: str, cast=float):
     text = (value or "").strip()
     if text == "":
@@ -800,6 +835,16 @@ def rule(char: str = "-", width: int = 78) -> str:
     return char * width
 
 
+def set_banner(paths: SetPaths) -> str:
+    """The header lines identifying which world this run describes."""
+    lines = ["Input set   : %s" % paths.name,
+             "  leaderboard: %s" % paths.leaderboard,
+             "  fixtures   : %s" % paths.fixtures]
+    if paths.name != DEFAULT_SET:
+        lines.insert(0, "*** SCENARIO SET -- NOT REALITY ***")
+    return "\n".join(lines)
+
+
 def report(
     me: Tipster,
     rivals: List[Tipster],
@@ -809,6 +854,7 @@ def report(
     n_sims: int,
     seed: int,
     tau: float,
+    paths: SetPaths,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -840,6 +886,8 @@ def report(
     print(rule("="))
     print("AFL TIPPING -- NEXT DECISION")
     print(rule("="))
+    print(set_banner(paths))
+    print(rule())
     print("Game        : %s  %s v %s" % (g0.game_id, g0.home, g0.away))
     if g0.lock_local:
         print("Locks       : %s" % g0.lock_local)
@@ -1034,15 +1082,17 @@ def report(
 
 
 def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
-                      result: Dict[str, object], method: str) -> str:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    path = os.path.join(OUTPUT_DIR, "recommendation.csv")
+                      result: Dict[str, object], method: str, paths: SetPaths) -> str:
+    os.makedirs(paths.output_dir, exist_ok=True)
+    path = os.path.join(paths.output_dir, "recommendation.csv")
     sol: Solution = result["solution"]           # type: ignore[assignment]
     p_fav: List[float] = result["p_fav"]          # type: ignore[assignment]
     fav_names: List[str] = result["fav_names"]    # type: ignore[assignment]
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["section", "key", "value", "detail"])
+        w.writerow(["set", "name", paths.name,
+                    "REAL" if paths.name == DEFAULT_SET else "SCENARIO -- NOT REALITY"])
         w.writerow(["next", "game_id", games[0].game_id,
                     "%s v %s" % (games[0].home, games[0].away)])
         w.writerow(["next", "lock_local", games[0].lock_local, ""])
@@ -1077,13 +1127,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--make-template", action="store_true",
-                        help="write blank inputs/*.csv to fill in")
+                        help="write blank CSVs into the target set")
     parser.add_argument("--recommend", action="store_true",
                         help="solve and print the next decision")
     parser.add_argument("--explain", action="store_true",
                         help="dump the reasoning for the next few games")
-    parser.add_argument("--fixtures", default=FIXTURES_CSV, help="path to fixtures CSV")
-    parser.add_argument("--leaderboard", default=LEADERBOARD_CSV, help="path to leaderboard CSV")
+    parser.add_argument("--set", dest="set_name", default=DEFAULT_SET, metavar="NAME",
+                        help="input set to read: inputs/NAME/ (default %s)" % DEFAULT_SET)
+    parser.add_argument("--copy-set", metavar="NAME",
+                        help="clone the %s set into inputs/NAME/, then exit" % DEFAULT_SET)
+    parser.add_argument("--force", action="store_true",
+                        help="with --copy-set, overwrite without prompting")
+    parser.add_argument("--fixtures", default=None,
+                        help="explicit fixtures CSV, overriding --set")
+    parser.add_argument("--leaderboard", default=None,
+                        help="explicit leaderboard CSV, overriding --set")
     parser.add_argument("--devig", default="odds_ratio",
                         choices=sorted(DEVIG_METHODS), help="devig method (default odds_ratio)")
     parser.add_argument("--tau", type=float, default=TAU_TIP,
@@ -1092,24 +1150,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--seed", type=int, default=20260814, help="RNG seed")
     args = parser.parse_args(argv)
 
-    if args.make_template:
-        write_template()
-        return 0
-    if not args.recommend:
-        parser.print_help()
-        return 0
-
     try:
-        me, rivals = load_leaderboard(args.leaderboard)
-        games = load_fixtures(args.fixtures)
+        paths, warnings = effective_paths(args.set_name, args.leaderboard, args.fixtures)
+
+        if args.copy_set:
+            written = copy_set(resolve_set(DEFAULT_SET), resolve_set(args.copy_set),
+                               force=args.force)
+            if not written:
+                print("Aborted. Nothing was written.")
+                return 0
+            for path in written:
+                print("Wrote %s" % path)
+            return 0
+
+        if args.make_template:
+            write_template(paths)
+            return 0
+
+        if not args.recommend:
+            parser.print_help()
+            return 0
+
+        for warning in warnings:
+            print("WARNING: %s" % warning, file=sys.stderr)
+
+        me, rivals = load_leaderboard(paths.leaderboard)
+        games = load_fixtures(paths.fixtures)
     except InputError as exc:
         print("INPUT ERROR: %s" % exc, file=sys.stderr)
         return 2
 
     result = report(me, rivals, games, args.devig, args.explain,
-                    args.sims, args.seed, args.tau)
-    path = write_csv_outputs(me, rivals, games, result, args.devig)
-    print("Wrote %s" % path)
+                    args.sims, args.seed, args.tau, paths)
+    out = write_csv_outputs(me, rivals, games, result, args.devig, paths)
+    print("Wrote %s" % out)
     return 0
 
 

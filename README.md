@@ -12,18 +12,44 @@ Python 3.9.
 ## Use
 
 ```sh
-python3 tipping.py --make-template            # write inputs/*.csv
-# ... fill in inputs/fixtures.csv ...
+python3 tipping.py --make-template            # write inputs/current/*.csv
+# ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 35 tests, ~0.7s
+python3 test_tipping.py                       # 52 tests, ~0.7s
 ```
+
+## Input sets
+
+Inputs live in named **sets**. A set is a directory pairing one leaderboard with
+one fixture list, so the two can never be mixed across sets by accident.
+
+```
+inputs/current/     reality -- keep this matching the comp site
+inputs/scenario/    sandbox -- edit freely to test what-ifs
+output/current/     output/scenario/
+```
+
+```sh
+python3 tipping.py --recommend                  # reads inputs/current/
+python3 tipping.py --recommend --set scenario   # reads inputs/scenario/
+python3 tipping.py --copy-set scenario          # reset the sandbox from current/
+```
+
+Set names are arbitrary, so `--set whatif-r23` works with no code change. Any set
+other than `current` prints a `*** SCENARIO SET -- NOT REALITY ***` banner and
+writes to its own output directory, so a sandbox run can never overwrite a real
+recommendation or be mistaken for one afterwards.
+
+`--fixtures` and `--leaderboard` still take explicit paths and override `--set`
+for that one file. Overriding exactly one of the two prints a warning, because it
+pairs a leaderboard from one world with fixtures from another.
 
 Useful flags: `--devig {proportional,odds_ratio,shin}` (default `odds_ratio`),
 `--tau` (rival margin-tip dispersion), `--sims`, `--seed`, `--fixtures`,
 `--leaderboard`.
 
-## Filling in `inputs/fixtures.csv`
+## Filling in `inputs/current/fixtures.csv`
 
 One row per **remaining** game, in lock order. Delete rows once played.
 
@@ -37,7 +63,7 @@ One row per **remaining** game, in lock order. Delete rows once played.
 | `is_margin_game` | `1` for the first game of each round, else `0` |
 | `p_home_override` | optional; your own model's P(home win). Beats the devig. |
 
-`inputs/leaderboard.csv` needs exactly one row with `is_me=1`.
+`inputs/current/leaderboard.csv` needs exactly one row with `is_me=1`.
 
 > `points`, not tips — DeanLFC's 145 includes a doubled round. Every remaining game
 > is worth 1 point because all double-point weeks are spent.
@@ -81,8 +107,9 @@ measured against the *same* result and so is correlated across rivals.
 
 ```
 tipping.py         the engine (devig, countback, rival model, joint DP, report)
-test_tipping.py    35 tests
-inputs/            leaderboard.csv, fixtures.csv
-output/            recommendation.csv
-docs/superpowers/specs/2026-08-14-afl-tipping-engine-design.md
+test_tipping.py    tests
+inputs/current/    leaderboard.csv, fixtures.csv -- reality
+inputs/scenario/   leaderboard.csv, fixtures.csv -- sandbox
+output/<set>/      recommendation.csv
+docs/superpowers/  specs/ and plans/
 ```
