@@ -915,6 +915,44 @@ def simulate_branches(
     )
 
 
+def simulate_contingency(
+    me: Tipster,
+    rivals: Sequence[Tipster],
+    games: Sequence[Game],
+    p_fav: Sequence[float],
+    n_games: int = 3,
+    deltas: Sequence[int] = (-2, -1, 0, 1, 2),
+    n_seasons: int = 6_000,
+    seed: int = 20260814,
+    reluctance: float = RELUCTANCE,
+    tau: float = TAU_TIP,
+    headline: Optional[SimulatedRecommendation] = None,
+) -> Dict[Tuple[int, int], SimulatedRecommendation]:
+    """The contingency grid, from the SAME simulation the headline uses.
+
+    Cell `(t, d)` asks: at game `t`, with my score `d` points off where tipping
+    every favourite would have put me and the rivals still on their level path,
+    what should I tip? That is exactly the season problem starting at game `t` with
+    my points shifted by `d`, so it reuses `simulate_branches` unchanged.
+
+    `headline` is slotted straight into cell (0, 0) rather than re-estimated. That
+    cell IS the decision the report leads with, and a second sample of the same
+    quantity could land the other side of a close call and contradict it.
+    """
+    cells: Dict[Tuple[int, int], SimulatedRecommendation] = {}
+    for t in range(min(n_games, len(games))):
+        for d in deltas:
+            if t == 0 and d == 0 and headline is not None:
+                cells[(t, d)] = headline
+                continue
+            shifted = Tipster(me.name, me.points + d, me.margin_error, is_me=True)
+            cells[(t, d)] = simulate_branches(
+                shifted, rivals, games[t:], p_fav[t:], n_seasons=n_seasons,
+                seed=seed, reluctance=reluctance, tau=tau,
+            )
+    return cells
+
+
 def evaluate_fixed_policy(
     me: Tipster,
     rivals: Sequence[Tipster],
@@ -1235,6 +1273,7 @@ def report(
     paths: SetPaths,
     reluctance: float = RELUCTANCE,
     n_seasons: int = 60_000,
+    contingency_seasons: int = 6_000,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -1386,28 +1425,39 @@ def report(
     # ---- Contingency table -----------------------------------------------------
     if explain and solution.action_at is not None:
         print(rule())
-        print("CONTINGENCY TABLE  (next %d games)" % min(3, len(games)))
+        n_show = min(3, len(games))
+        cells = simulate_contingency(
+            me, rivals, games, p_fav, n_games=n_show, deltas=(-2, -1, 0, 1, 2),
+            n_seasons=contingency_seasons, seed=seed, reluctance=reluctance,
+            tau=tau, headline=sim,
+        )
+        print("CONTINGENCY TABLE  (next %d games, %d simulated seasons per cell)"
+              % (n_show, contingency_seasons))
         print(rule())
         print("Read this at the ground. 'delta' is your net points versus tipping every")
         print("favourite: +1 for each dog you took that won, -1 for each that lost.")
         print("Rival deltas are held on their level path, which is where they start.")
+        print("Same simulation as the headline, so the delta +0 row of the first game")
+        print("IS the recommendation above -- not a second opinion on it.")
         print()
-        zero = tuple(0 for _ in groups)
-        for t in range(min(3, len(games))):
+        for t in range(n_show):
             g = games[t]
             fav_t, dog_t = fav_names[t], underdog_name(g)
             print("  %s  %s v %s   favourite %s (%s)" %
                   (g.game_id, g.home, g.away, fav_t, pct(p_fav[t])))
-            for d in range(-2, 3):
-                best, v_f, v_d = solution.action_at(t, d, zero)
-                label = dog_t if best == "D" else fav_t
-                print("      delta %+d  ->  tip %-20s  fav %s   dog %s" %
-                      (d, label, pct(v_f), pct(v_d)))
+            for d in (-2, -1, 0, 1, 2):
+                cell = cells[(t, d)]
+                label = dog_t if cell.action == "D" else fav_t
+                gap = abs(cell.p_win_favourite - cell.p_win_underdog)
+                flag = "  (too close to call)" if gap < 2.0 * cell.stderr_edge else ""
+                print("      delta %+d  ->  tip %-20s  fav %s   dog %s%s" %
+                      (d, label, pct(cell.p_win_favourite),
+                       pct(cell.p_win_underdog), flag))
             print()
 
     # ---- Baselines -------------------------------------------------------------
     print(rule())
-    print("BASELINE COMPARISON  (same rival model throughout)")
+    print("BASELINE COMPARISON  [exact grouped solve -- relative only]")
     print(rule())
     baselines = {
         "always favourite": lambda t, d: "F",
@@ -1428,7 +1478,7 @@ def report(
     # would keep pushing. This is a belief about rivals that no input file settles,
     # so both are reported rather than one being picked.
     print(rule())
-    print("CHASER MODEL SENSITIVITY")
+    print("CHASER MODEL SENSITIVITY  [exact grouped solve -- relative only]")
     print(rule())
     chaser_rows = []
     for label, gain in (("satisficing (pure level-0)", 0),
@@ -1450,7 +1500,7 @@ def report(
 
     # ---- Devig sensitivity -----------------------------------------------------
     print(rule())
-    print("DEVIG SENSITIVITY")
+    print("DEVIG SENSITIVITY  [exact grouped solve -- relative only]")
     print(rule())
     actions = {}
     sens_rows = []
@@ -1472,7 +1522,7 @@ def report(
     # ---- Margin tip ------------------------------------------------------------
     print(rule())
     if margin_indices:
-        print("MARGIN TIP  (%s)" % games[margin_indices[0]].game_id)
+        print("MARGIN TIP  (%s)  [exact grouped solve]" % games[margin_indices[0]].game_id)
     else:
         print("MARGIN TIP  (none remaining)")
     print(rule())
@@ -1627,6 +1677,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         choices=sorted(DEVIG_METHODS), help="devig method (default odds_ratio)")
     parser.add_argument("--sim-seasons", type=int, default=60_000,
                         help="seasons to simulate for the win-probability table")
+    parser.add_argument("--contingency-seasons", type=int, default=6_000,
+                        help="seasons per --explain contingency cell (there are ~15)")
     parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
                         help="rivals' reluctance to back a heavy underdog "
                              "(default %.2f, 0 = pure expected value)" % RELUCTANCE)
@@ -1668,7 +1720,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     result = report(me, rivals, games, args.devig, args.explain,
                     args.sims, args.seed, args.tau, paths, args.reluctance,
-                    args.sim_seasons)
+                    args.sim_seasons, args.contingency_seasons)
     out = write_csv_outputs(me, rivals, games, result, args.devig, paths)
     print("Wrote %s" % out)
     return 0

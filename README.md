@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 93 tests, ~6.5s
+python3 test_tipping.py                       # 98 tests, ~9s
 ```
 
 ## Input sets
@@ -119,6 +119,13 @@ on how the results fall before it, so there is no fixed sequence of future tips 
 only a rule that answers the standings. Read the likeliest row as "the next underdog
 you are most likely to need", and the `never deviate` row as the chance you can ride
 favourites home.
+
+`CONTINGENCY TABLE` (`--explain`) comes from the same simulation, so its `delta +0`
+row for the next game **is** the headline recommendation rather than a second opinion
+on it. Cells whose two branches sit inside the sampling error are marked
+`too close to call` instead of being given a spurious winner. It costs roughly 15
+extra simulations, so it runs at `--contingency-seasons` (default 6000) rather than
+the headline's 60000, and `--explain` takes about a minute.
 
 Everything below the table — baselines, chaser sensitivity, devig sensitivity, the
 margin-tip sweep — still comes from the exact grouped solve, which is a different

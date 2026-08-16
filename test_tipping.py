@@ -580,6 +580,55 @@ class TestSimulatedRecommendation(unittest.TestCase):
         self.assertEqual(a.p_win_underdog, b.p_win_underdog)
 
 
+class TestSimulatedContingency(unittest.TestCase):
+    """The contingency table must come from the same model as the headline."""
+
+    def _fixture(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(5)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        return games, p_fav
+
+    def test_the_now_cell_is_the_headline_itself(self):
+        # THE CONSISTENCY GUARANTEE. Game 0 at delta 0 IS the decision the headline
+        # reports, so it must be the identical object, not a re-estimate that could
+        # land the other side of a coin flip.
+        games, p_fav = self._fixture()
+        head = T.simulate_branches(ME, RIVALS, games, p_fav, n_seasons=1200, seed=4)
+        cells = T.simulate_contingency(ME, RIVALS, games, p_fav, n_games=2,
+                                       deltas=(-1, 0, 1), n_seasons=400, seed=4,
+                                       headline=head)
+        self.assertIs(cells[(0, 0)], head)
+
+    def test_every_cell_picks_its_own_better_branch(self):
+        games, p_fav = self._fixture()
+        cells = T.simulate_contingency(ME, RIVALS, games, p_fav, n_games=2,
+                                       deltas=(-1, 0, 1), n_seasons=400, seed=4)
+        for key, r in cells.items():
+            self.assertAlmostEqual(r.p_win, max(r.p_win_favourite, r.p_win_underdog),
+                                   places=12, msg=str(key))
+
+    def test_a_bigger_delta_is_never_worse(self):
+        # Being further ahead of the all-favourites baseline cannot hurt.
+        games, p_fav = self._fixture()
+        cells = T.simulate_contingency(ME, RIVALS, games, p_fav, n_games=1,
+                                       deltas=(-2, 0, 2), n_seasons=3000, seed=4)
+        self.assertLessEqual(cells[(0, -2)].p_win, cells[(0, 0)].p_win + 0.02)
+        self.assertLessEqual(cells[(0, 0)].p_win, cells[(0, 2)].p_win + 0.02)
+
+    def test_it_covers_the_requested_grid(self):
+        games, p_fav = self._fixture()
+        cells = T.simulate_contingency(ME, RIVALS, games, p_fav, n_games=3,
+                                       deltas=(-1, 0, 1), n_seasons=300, seed=4)
+        self.assertEqual(sorted(cells), sorted((t, d) for t in range(3)
+                                               for d in (-1, 0, 1)))
+
+    def test_each_cell_reports_its_own_sampling_error(self):
+        games, p_fav = self._fixture()
+        cells = T.simulate_contingency(ME, RIVALS, games, p_fav, n_games=1,
+                                       deltas=(0,), n_seasons=500, seed=4)
+        self.assertGreaterEqual(cells[(0, 0)].stderr_edge, 0.0)
+
+
 class TestDeviationReluctance(unittest.TestCase):
     """Rivals should take dogs readily in close games and rarely in lopsided ones."""
 

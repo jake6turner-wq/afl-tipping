@@ -139,6 +139,31 @@ has just left. There is no plan, only a rule.
 Probabilities use `pct_mc`, so a unanimous outcome prints `>99.998%` rather than
 claiming a certainty 60,000 draws cannot support.
 
+## The contingency table
+
+Driven by the same simulation, so no section of the report contradicts another.
+
+Cell `(t, d)` asks what to tip at game `t` with my score `d` off the all-favourites
+baseline and the rivals on their level path. That is exactly the season problem
+starting at game `t` with my points shifted by `d`, so it reuses
+`simulate_branches` on `games[t:]` with no new machinery.
+
+**Cell (0, 0) is the headline object itself**, not a re-estimate. It is the same
+quantity the report leads with, and a second smaller sample of it could land the
+other side of a close call and contradict the recommendation — which is precisely
+the bug this replaced. Passing the headline in guarantees agreement.
+
+There are about 15 cells, so it runs at its own lower season count
+(`--contingency-seasons`, default 6000). At that size the edge error is around one
+percentage point, which cannot resolve every cell, so cells whose branches sit
+within two standard errors are printed `too close to call` rather than given a
+winner the sample does not support.
+
+`BASELINE COMPARISON`, `CHASER MODEL SENSITIVITY`, `DEVIG SENSITIVITY` and
+`MARGIN TIP` still come from the exact grouped solve and are labelled
+`[exact grouped solve -- relative only]` in their headers, so the boundary between
+the two models is visible at the point of reading rather than buried in a footnote.
+
 ## Reporting
 
 `--recommend` prints the simulated table, with the count and the standard error, and
