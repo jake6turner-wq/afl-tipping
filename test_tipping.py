@@ -5,6 +5,7 @@ Run:  python3 test_tipping.py
 """
 
 import math
+import random
 import unittest
 
 import tipping as T
@@ -721,6 +722,34 @@ class TestEquilibriumSolver(unittest.TestCase):
                                n_seasons=40, seed=4, decide=spy)
         self.assertEqual(max(seen), len(games) - 1,
                          "the last game must be reached by its absolute index")
+
+    def test_exploration_draws_from_the_market(self):
+        # Exploring a 96% favourite with a coin flip invents states real play never
+        # reaches. The explored action must follow the price instead.
+        rng = random.Random(5)
+        for p in (0.5, 0.62, 0.96):
+            favs = sum(1 for _ in range(20000)
+                       if T._explore_action(rng.random(), p) == "F")
+            self.assertAlmostEqual(favs / 20000.0, p, delta=0.02,
+                                   msg="p_fav=%s" % p)
+
+    def test_market_exploration_concentrates_on_lopsided_fixtures(self):
+        # Drawing exploratory tips at the market price means a fixture of
+        # near-certainties is barely perturbed, so samples concentrate; a fixture of
+        # coin flips has genuine variety to cover and must scatter far wider. The
+        # comparison is the invariant -- no magic threshold to tune.
+        def scatter(home_odds, away_odds):
+            games = [_game("G%d" % i, home_odds, away_odds) for i in range(4)]
+            p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+            pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=2000,
+                                      sweeps=1, seed=3, min_visits=10)
+            self.assertGreater(pol.n_states, 0)
+            return pol.thin_states
+
+        heavy = scatter(1.02, 15.0)
+        even = scatter(1.95, 1.95)
+        self.assertLess(heavy, even / 2.0,
+                        "near-certainties should scatter far less than coin flips")
 
     def test_the_same_seed_learns_the_same_policy(self):
         games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]

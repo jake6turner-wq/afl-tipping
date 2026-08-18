@@ -928,6 +928,17 @@ def simulate_branches(
     )
 
 
+def _explore_action(draw: float, p_fav: float) -> str:
+    """An exploratory tip drawn FROM THE MARKET rather than from a coin flip.
+
+    Flipping a coin on a 96% favourite manufactures states real play never reaches:
+    half the field backing a 15.00 outsider. Sampling at the market price instead
+    means a lopsided game is barely perturbed while a genuine coin flip still
+    generates variety, so the solver's samples land where the season actually goes.
+    """
+    return "F" if draw < p_fav else "D"
+
+
 class EquilibriumPolicy:
     """A decision rule learned by backward induction over simulated seasons.
 
@@ -975,7 +986,7 @@ def solve_equilibrium(
     tau: float = TAU_TIP,
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
-    explore: float = 0.25,
+    explore: float = 1.0,
     min_visits: int = 25,
 ) -> EquilibriumPolicy:
     """Learn a decision rule by working BACKWARDS through simulated seasons.
@@ -1022,13 +1033,14 @@ def solve_equilibrium(
                                                 rng.gauss, tau, sigma)
                 scores, errors = list(start_scores), list(start_errors)
 
-                # Reach game t under the current rule, jittered so the backward pass
-                # sees a spread of positions rather than one narrow corridor.
+                # Reach game t under the current rule, jittered at the market price
+                # so the backward pass sees a spread of REACHABLE positions rather
+                # than a scatter of ones no season would produce.
                 for u in range(t):
                     acts = _actions(scores, errors, u, policy)
                     if rng.random() < explore:
                         j = rng.randrange(n)
-                        acts[j] = "D" if acts[j] == "F" else "F"
+                        acts[j] = _explore_action(rng.random(), p_fav[u])
                     apply(scores, errors, games[u], acts, results[u], margins.get(u))
 
                 # The decision under test: one tipster tries an action at random,
