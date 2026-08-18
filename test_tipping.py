@@ -629,6 +629,98 @@ class TestSimulatedContingency(unittest.TestCase):
         self.assertGreaterEqual(cells[(0, 0)].stderr_edge, 0.0)
 
 
+class TestEquilibriumSolver(unittest.TestCase):
+    """Backward induction over sampled seasons, rather than a level-0 rollout."""
+
+    def _solve(self, me, rivals, games, n_seasons=600, sweeps=2, seed=3):
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        return T.solve_equilibrium(me, rivals, games, p_fav, n_seasons=n_seasons,
+                                   sweeps=sweeps, seed=seed)
+
+    def test_it_learns_a_policy_and_reports_its_own_coverage(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        pol = self._solve(ME, RIVALS, games)
+        self.assertGreater(pol.n_states, 0)
+        self.assertGreaterEqual(pol.min_samples, 1)
+        self.assertIsInstance(pol.settled, bool)
+
+    def test_it_is_callable_as_a_decision_rule(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        pol = self._solve(ME, RIVALS, games)
+        act = pol(0, T._standing([155, 156], [500.0, 600.0], 0))
+        self.assertIn(act, ("F", "D"))
+
+    def test_an_unseen_state_falls_back_rather_than_failing(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        pol = self._solve(ME, RIVALS, games)
+        weird = T._standing([100, 400], [1.0, 2.0], 0)
+        before = pol.misses
+        self.assertIn(pol(0, weird), ("F", "D"))
+        self.assertGreater(pol.misses, before)
+
+    def test_a_runaway_leader_is_told_to_hold(self):
+        # Nothing can catch them, so every action is a win and the rule must not
+        # gratuitously take dogs.
+        leader = T.Tipster("Jake Turner", 400, 1, is_me=True)
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        pol = self._solve(leader, RIVALS, games, n_seasons=800)
+        self.assertEqual(pol(0, T._standing([400, 150], [1.0, 900.0], 0)), "F")
+
+    def test_a_last_game_deficit_forces_the_dog(self):
+        # One game left, a point down, but holding the better margin error so a tie
+        # WINS. The leader tips the favourite, so matching them keeps the deficit at
+        # one and loses for certain; the dog draws level and takes the countback.
+        # Backward induction must find that, since it is the only path.
+        games = [_game("G0", 1.6, 2.4)]
+        chaser = T.Tipster("Jake Turner", 150, 100, is_me=True)
+        rivals = [T.Tipster("Ahead", 151, 900)]
+        pol = self._solve(chaser, rivals, games, n_seasons=1500, sweeps=1)
+        self.assertEqual(pol(0, T._standing([150, 151], [100.0, 900.0], 0)), "D")
+
+    def test_a_last_game_leader_holds(self):
+        games = [_game("G0", 1.6, 2.4)]
+        leader = T.Tipster("Jake Turner", 152, 100, is_me=True)
+        rivals = [T.Tipster("Behind", 151, 900)]
+        pol = self._solve(leader, rivals, games, n_seasons=1500, sweeps=1)
+        self.assertEqual(pol(0, T._standing([152, 151], [100.0, 900.0], 0)), "F")
+
+    def test_a_thinly_sampled_state_is_left_to_the_fallback(self):
+        # A state seen twice is not knowledge. Writing a coin flip into the table
+        # would dress noise up as a decision, so it must be left out and counted.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        strict = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=600,
+                                     sweeps=1, seed=3, min_visits=10_000)
+        self.assertEqual(strict.n_states, 0, "nothing should clear that bar")
+        self.assertGreater(strict.thin_states, 0)
+        loose = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=600,
+                                    sweeps=1, seed=3, min_visits=1)
+        self.assertGreater(loose.n_states, strict.n_states)
+
+    def test_kept_states_all_clear_the_bar(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=1500,
+                                  sweeps=1, seed=3, min_visits=20)
+        if pol.n_states:
+            self.assertGreaterEqual(pol.min_samples, 20)
+
+    def test_the_same_seed_learns_the_same_policy(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        a = self._solve(ME, RIVALS, games)
+        b = self._solve(ME, RIVALS, games)
+        self.assertEqual(a.table, b.table)
+
+    def test_the_learned_policy_drives_the_simulation(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        pol = self._solve(ME, RIVALS, games)
+        r = T.simulate_branches(ME, RIVALS, games, p_fav, n_seasons=800, seed=6,
+                                decide=pol)
+        self.assertAlmostEqual(sum(p for _, p in r.table), 1.0, places=9)
+        self.assertIn(r.action, ("F", "D"))
+
+
 class TestDeviationReluctance(unittest.TestCase):
     """Rivals should take dogs readily in close games and rarely in lopsided ones."""
 

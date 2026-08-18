@@ -60,6 +60,13 @@ the induction moves to `t-1`.
   situation. That is what makes it tractable and sample-efficient, but it cannot
   express a rival who is idiosyncratically reckless.
 - Unvisited states fall back to the existing level-0 decision rather than guessing.
+- **A state must clear `min_visits` samples per arm before it is kept.** The first
+  build without this bar learned 3292 states, some decided on a *single* sampled
+  season, and flipped the scenario recommendation on that basis. Writing a coin flip
+  into the table dresses noise up as knowledge; a thin state is now left on the
+  level-0 rule and counted separately.
+- The fallback count is reported. If it dwarfs the learned states, most decisions are
+  still level-0 and the run should not be leaned on.
 
 ## Interface
 

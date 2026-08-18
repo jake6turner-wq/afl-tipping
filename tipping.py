@@ -670,6 +670,28 @@ def simulated_actions(
     return _actions(scores, errors, t, _decision_cache(p_fav, reluctance, clamp))
 
 
+def _standing(scores, errors, i) -> Tuple[Tuple[int, int], ...]:
+    """One tipster's situation: the multiset of (points gap, who wins a tie).
+
+    Order-independent, so sorting canonicalises it. This is the whole state a
+    tipster's decision depends on, and it is shared across tipsters -- which is what
+    lets one policy table serve the entire field.
+    """
+    standing = []
+    for j in range(len(scores)):
+        if j == i:
+            continue
+        if errors[i] < errors[j]:
+            tiebreak = 1
+        elif errors[i] > errors[j]:
+            tiebreak = -1
+        else:
+            tiebreak = 0
+        standing.append((scores[j] - scores[i], tiebreak))
+    standing.sort()
+    return tuple(standing)
+
+
 def _actions(scores, errors, t, decide) -> List[str]:
     """Each tipster's action given the live standings, using margin errors as
     accumulated so far in this very season.
@@ -679,22 +701,9 @@ def _actions(scores, errors, t, decide) -> List[str]:
     its own -- and a tipster who is level on points but behind on the countback is
     NOT winning, and correctly keeps chasing.
     """
-    n = len(scores)
     acts = []
-    for i in range(n):
-        standing = []
-        for j in range(n):
-            if j == i:
-                continue
-            if errors[i] < errors[j]:
-                tiebreak = 1
-            elif errors[i] > errors[j]:
-                tiebreak = -1
-            else:
-                tiebreak = 0
-            standing.append((scores[j] - scores[i], tiebreak))
-        standing.sort()
-        acts.append(decide(t, tuple(standing)))
+    for i in range(len(scores)):
+        acts.append(decide(t, _standing(scores, errors, i)))
     return acts
 
 
@@ -786,6 +795,7 @@ def simulate_seasons(
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
     force_first_me: Optional[str] = None,
+    decide: Optional[Callable[[int, Tuple[Tuple[int, int], ...]], str]] = None,
 ) -> List[Tuple[str, float]]:
     """Play the rest of the season out `n_seasons` times; return P(finish first).
 
@@ -799,7 +809,8 @@ def simulate_seasons(
     start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
     n = len(names)
 
-    decide = _decision_cache(p_fav, reluctance, clamp)
+    if decide is None:
+        decide = _decision_cache(p_fav, reluctance, clamp)
     rng = random.Random(seed)
     wins = [0.0] * n
 
@@ -829,6 +840,7 @@ def simulate_branches(
     tau: float = TAU_TIP,
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
+    decide: Optional[Callable[[int, Tuple[Tuple[int, int], ...]], str]] = None,
 ) -> SimulatedRecommendation:
     """Decide the next tip from the simulation itself, and report the race under it.
 
@@ -852,7 +864,8 @@ def simulate_branches(
     start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
     n = len(names)
 
-    decide = _decision_cache(p_fav, reluctance, clamp)
+    if decide is None:
+        decide = _decision_cache(p_fav, reluctance, clamp)
     rng = random.Random(seed)
     wins = {"F": [0.0] * n, "D": [0.0] * n}
     deviations: Dict[str, Dict[Optional[int], int]] = {"F": {}, "D": {}}
@@ -915,6 +928,151 @@ def simulate_branches(
     )
 
 
+class EquilibriumPolicy:
+    """A decision rule learned by backward induction over simulated seasons.
+
+    Callable with the same signature as the level-0 cache, so it drops straight into
+    `_actions` and therefore into every part of the report that takes a decision
+    rule. States never visited during solving fall back to the level-0 rule rather
+    than guessing, and the fallbacks are counted.
+    """
+
+    def __init__(self, table, fallback, n_seasons, sweeps, min_samples, settled,
+                 thin_states=0):
+        self.table: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], str] = table
+        self.fallback = fallback
+        self.n_seasons = n_seasons
+        self.sweeps = sweeps
+        self.min_samples = min_samples
+        self.settled = settled
+        self.thin_states = thin_states
+        self.misses = 0
+
+    @property
+    def n_states(self) -> int:
+        return len(self.table)
+
+    def __call__(self, t: int, standing: Tuple[Tuple[int, int], ...]) -> str:
+        hit = self.table.get((t, standing))
+        if hit is not None:
+            return hit
+        self.misses += 1
+        return self.fallback(t, standing)
+
+
+def solve_equilibrium(
+    me: Tipster,
+    rivals: Sequence[Tipster],
+    games: Sequence[Game],
+    p_fav: Sequence[float],
+    n_seasons: int = 4_000,
+    sweeps: int = 3,
+    seed: int = 20260814,
+    reluctance: float = RELUCTANCE,
+    tau: float = TAU_TIP,
+    sigma: float = SIGMA_MARGIN,
+    clamp: int = DELTA_CLAMP,
+    explore: float = 0.25,
+    min_visits: int = 25,
+) -> EquilibriumPolicy:
+    """Learn a decision rule by working BACKWARDS through simulated seasons.
+
+    For each game from the last to the first, sample seasons that reach it, have one
+    focus tipster try each action there while everyone else plays the current rule,
+    and finish the season on the policy already settled for every later game. The
+    action that wins more often becomes the rule at that game.
+
+    Deciding the last game first is what makes this well founded: by the time game
+    `t` is judged, games `t+1..end` are already being played optimally, so an
+    action's value is measured against optimal continuation rather than a heuristic
+    rollout. The repeated `sweeps` at a fixed game are iterated best response within
+    that stage -- each sweep answers the policy the previous one produced.
+    """
+    n = 1 + len(rivals)
+    n_games = len(games)
+    start_scores = [me.points] + [r.points for r in rivals]
+    start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
+
+    fallback = _decision_cache(p_fav, reluctance, clamp)
+    table: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], str] = {}
+    policy = EquilibriumPolicy(table, fallback, n_seasons, sweeps, 0, True)
+    rng = random.Random(seed)
+    min_samples = None
+    settled = True
+    thin = 0
+
+    def apply(scores, errors, game, acts, fav_won, drawn):
+        for i in range(n):
+            if (acts[i] == "F") == fav_won:
+                scores[i] += 1
+        if drawn is not None:
+            actual, rival_tips = drawn
+            errors[0] += abs(actual - game.line_fav)
+            for j in range(1, n):
+                errors[j] += abs(actual - rival_tips[j - 1])
+
+    for t in range(n_games - 1, -1, -1):
+        for sweep in range(sweeps):
+            stats: Dict[Tuple[Tuple[Tuple[int, int], ...], str], List[float]] = {}
+            for _ in range(n_seasons):
+                results, margins = _draw_season(games, p_fav, n - 1, rng.random,
+                                                rng.gauss, tau, sigma)
+                scores, errors = list(start_scores), list(start_errors)
+
+                # Reach game t under the current rule, jittered so the backward pass
+                # sees a spread of positions rather than one narrow corridor.
+                for u in range(t):
+                    acts = _actions(scores, errors, u, policy)
+                    if rng.random() < explore:
+                        j = rng.randrange(n)
+                        acts[j] = "D" if acts[j] == "F" else "F"
+                    apply(scores, errors, games[u], acts, results[u], margins.get(u))
+
+                # The decision under test: one tipster tries an action at random,
+                # everyone else answers with the rule as it currently stands.
+                focus = rng.randrange(n)
+                standing = _standing(scores, errors, focus)
+                acts = _actions(scores, errors, t, policy)
+                action = "D" if rng.random() < 0.5 else "F"
+                acts[focus] = action
+                apply(scores, errors, games[t], acts, results[t], margins.get(t))
+
+                # Finish on the already-settled policy for every later game.
+                for u in range(t + 1, n_games):
+                    acts = _actions(scores, errors, u, policy)
+                    apply(scores, errors, games[u], acts, results[u], margins.get(u))
+
+                winners = _season_winners(scores, errors)
+                payoff = (1.0 / len(winners)) if focus in winners else 0.0
+                cell = stats.setdefault((standing, action), [0.0, 0])
+                cell[0] += payoff
+                cell[1] += 1
+
+            for standing in {s for s, _ in stats}:
+                f = stats.get((standing, "F"))
+                d = stats.get((standing, "D"))
+                if not f or not d:
+                    thin += 1
+                    continue          # cannot compare without both arms sampled
+                seen = min(f[1], d[1])
+                if seen < min_visits:
+                    # Too few samples to beat the level-0 fallback. Leaving the state
+                    # out is honest; writing a coin flip in would look like knowledge.
+                    thin += 1
+                    continue
+                min_samples = seen if min_samples is None else min(min_samples, seen)
+                choice = "D" if d[0] / d[1] > f[0] / f[1] else "F"
+                key = (t, standing)
+                if sweep == sweeps - 1 and table.get(key) not in (None, choice):
+                    settled = False   # the final sweep still moved this state
+                table[key] = choice
+
+    policy.min_samples = 0 if min_samples is None else min_samples
+    policy.settled = settled
+    policy.thin_states = thin
+    return policy
+
+
 def simulate_contingency(
     me: Tipster,
     rivals: Sequence[Tipster],
@@ -927,6 +1085,7 @@ def simulate_contingency(
     reluctance: float = RELUCTANCE,
     tau: float = TAU_TIP,
     headline: Optional[SimulatedRecommendation] = None,
+    decide: Optional[Callable[[int, Tuple[Tuple[int, int], ...]], str]] = None,
 ) -> Dict[Tuple[int, int], SimulatedRecommendation]:
     """The contingency grid, from the SAME simulation the headline uses.
 
@@ -948,7 +1107,7 @@ def simulate_contingency(
             shifted = Tipster(me.name, me.points + d, me.margin_error, is_me=True)
             cells[(t, d)] = simulate_branches(
                 shifted, rivals, games[t:], p_fav[t:], n_seasons=n_seasons,
-                seed=seed, reluctance=reluctance, tau=tau,
+                seed=seed, reluctance=reluctance, tau=tau, decide=decide,
             )
     return cells
 
@@ -1274,6 +1433,9 @@ def report(
     reluctance: float = RELUCTANCE,
     n_seasons: int = 60_000,
     contingency_seasons: int = 6_000,
+    equilibrium: bool = False,
+    eq_seasons: int = 4_000,
+    eq_sweeps: int = 3,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -1298,8 +1460,18 @@ def report(
     groups = build_rival_groups(rivals, [me] + rivals, p_fav,
                                 reluctance=reluctance)
     solution = solve_joint(me, rivals, p_fav, groups, countback)
+    eq_policy = None
+    if equilibrium:
+        print()
+        print("Solving the equilibrium policy: backward induction over %d sampled"
+              % eq_seasons)
+        print("seasons per game, %d sweeps each..." % eq_sweeps)
+        eq_policy = solve_equilibrium(me, rivals, games, p_fav, n_seasons=eq_seasons,
+                                      sweeps=eq_sweeps, seed=seed,
+                                      reluctance=reluctance, tau=tau)
     sim = simulate_branches(me, rivals, games, p_fav, n_seasons=n_seasons,
-                            seed=seed, reluctance=reluctance, tau=tau)
+                            seed=seed, reluctance=reluctance, tau=tau,
+                            decide=eq_policy)
 
     g0 = games[0]
     fav0, dog0 = fav_names[0], underdog_name(g0)
@@ -1377,6 +1549,32 @@ def report(
     print("    one-step lookahead over a rollout policy, not a full optimum. The")
     print("    exact grouped solve is reported alongside as a cross-check.")
     print()
+    if eq_policy is not None:
+        print(rule())
+        print("EQUILIBRIUM POLICY  (backward induction over sampled seasons)")
+        print(rule())
+        print("    Decided from the LAST game backwards, so each game was judged")
+        print("    against later games already being played well -- not against a")
+        print("    level-0 rollout. Every tipster answers the same learned rule.")
+        print()
+        print("    states learned          : %d" % eq_policy.n_states)
+        print("    seasons per game, sweeps: %d x %d" % (eq_seasons, eq_sweeps))
+        print("    thinnest state kept     : %d seasons per arm" % eq_policy.min_samples)
+        print("    states too thin to keep : %d (left on the level-0 rule)"
+              % eq_policy.thin_states)
+        print("    fell back to level-0    : %d lookups" % eq_policy.misses)
+        if not eq_policy.settled:
+            print()
+            print("    *** WARNING: the final sweep was still changing actions, so")
+            print("    this has NOT converged. Raise --equilibrium-sweeps or")
+            print("    --equilibrium-seasons before leaning on it. ***")
+        if eq_policy.n_states < eq_policy.thin_states:
+            print()
+            print("    *** WARNING: more states were too thinly sampled to learn")
+            print("    than were learned, so most decisions still come from the")
+            print("    level-0 rule. Raise --equilibrium-seasons. ***")
+        print()
+
     print(rule())
     print("YOUR NEXT DEVIATION  (when you first tip an underdog, same seasons)")
     print(rule())
@@ -1429,7 +1627,7 @@ def report(
         cells = simulate_contingency(
             me, rivals, games, p_fav, n_games=n_show, deltas=(-2, -1, 0, 1, 2),
             n_seasons=contingency_seasons, seed=seed, reluctance=reluctance,
-            tau=tau, headline=sim,
+            tau=tau, headline=sim, decide=eq_policy,
         )
         print("CONTINGENCY TABLE  (next %d games, %d simulated seasons per cell)"
               % (n_show, contingency_seasons))
@@ -1677,6 +1875,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                         choices=sorted(DEVIG_METHODS), help="devig method (default odds_ratio)")
     parser.add_argument("--sim-seasons", type=int, default=60_000,
                         help="seasons to simulate for the win-probability table")
+    parser.add_argument("--equilibrium", action="store_true",
+                        help="derive the policy by backward induction over sampled "
+                             "seasons instead of one-step lookahead (slow)")
+    parser.add_argument("--equilibrium-seasons", type=int, default=4_000,
+                        help="sampled seasons per game when solving the equilibrium")
+    parser.add_argument("--equilibrium-sweeps", type=int, default=3,
+                        help="best-response sweeps per game when solving")
     parser.add_argument("--contingency-seasons", type=int, default=6_000,
                         help="seasons per --explain contingency cell (there are ~15)")
     parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
@@ -1720,7 +1925,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     result = report(me, rivals, games, args.devig, args.explain,
                     args.sims, args.seed, args.tau, paths, args.reluctance,
-                    args.sim_seasons, args.contingency_seasons)
+                    args.sim_seasons, args.contingency_seasons, args.equilibrium,
+                    args.equilibrium_seasons, args.equilibrium_sweeps)
     out = write_csv_outputs(me, rivals, games, result, args.devig, paths)
     print("Wrote %s" % out)
     return 0

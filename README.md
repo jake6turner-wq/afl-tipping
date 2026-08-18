@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 98 tests, ~9s
+python3 test_tipping.py                       # 106 tests, ~10s
 ```
 
 ## Input sets
@@ -126,6 +126,35 @@ on it. Cells whose two branches sit inside the sampling error are marked
 `too close to call` instead of being given a spurious winner. It costs roughly 15
 extra simulations, so it runs at `--contingency-seasons` (default 6000) rather than
 the headline's 60000, and `--explain` takes about a minute.
+
+### `--equilibrium`
+
+By default every tipster plays a **level-0** rule: they pick their best action
+assuming the rest of the field tips favourites. Their own deviations are therefore
+invisible to each other, and your recommendation is one-step lookahead over that
+rollout.
+
+`--equilibrium` replaces it with a policy learned by **backward induction over
+simulated seasons**. Working from the last game to the first, it samples seasons that
+reach each game, has one tipster try each action there while the others answer with
+the current rule, and finishes on the policy already settled for every later game.
+Because the last game is decided first, each action is judged against later games
+already being played well rather than against a heuristic. Repeated sweeps at a fixed
+game are iterated best response within that stage.
+
+```sh
+python3 tipping.py --recommend --equilibrium
+python3 tipping.py --recommend --equilibrium --equilibrium-seasons 10000 --equilibrium-sweeps 5
+```
+
+It is **approximate, not a proven equilibrium**, and it says so: the report prints how
+many states it learned, the thinnest sample behind any of them, how often it fell back
+to level-0 on an unseen state, and a `WARNING` if the final sweep was still changing
+actions. Exact equilibrium is not available at any budget — ten players over nine
+games is ~10^10 joint states with 1024 action profiles per node.
+
+All ten tipsters share one learned rule keyed by their own situation. That is what
+makes it tractable, and it cannot express an idiosyncratically reckless rival.
 
 Everything below the table — baselines, chaser sensitivity, devig sensitivity, the
 margin-tip sweep — still comes from the exact grouped solve, which is a different
