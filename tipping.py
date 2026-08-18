@@ -947,6 +947,8 @@ class EquilibriumPolicy:
         self.settled = settled
         self.thin_states = thin_states
         self.misses = 0
+        self.hits = 0
+        self.solve_misses = 0
 
     @property
     def n_states(self) -> int:
@@ -955,6 +957,7 @@ class EquilibriumPolicy:
     def __call__(self, t: int, standing: Tuple[Tuple[int, int], ...]) -> str:
         hit = self.table.get((t, standing))
         if hit is not None:
+            self.hits += 1
             return hit
         self.misses += 1
         return self.fallback(t, standing)
@@ -1070,6 +1073,9 @@ def solve_equilibrium(
     policy.min_samples = 0 if min_samples is None else min_samples
     policy.settled = settled
     policy.thin_states = thin
+    policy.solve_misses = policy.misses
+    policy.misses = 0      # from here the counts reflect REPORTING use, not solving
+    policy.hits = 0
     return policy
 
 
@@ -1579,6 +1585,11 @@ def report(
         print("    thinnest state kept     : %d seasons per arm" % eq_policy.min_samples)
         print("    states too thin to keep : %d (left on the level-0 rule)"
               % eq_policy.thin_states)
+        used = "n/a"
+        total = eq_policy.misses + eq_policy.hits
+        if total:
+            used = "%.1f%% of lookups" % (100.0 * eq_policy.hits / total)
+        print("    learned rule applied to : %s" % used)
         print("    fell back to level-0    : %d lookups" % eq_policy.misses)
         if not eq_policy.settled:
             print()
