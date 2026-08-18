@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 106 tests, ~10s
+python3 test_tipping.py                       # 114 tests, ~12s
 ```
 
 ## Input sets
@@ -146,6 +146,10 @@ game are iterated best response within that stage.
 python3 tipping.py --recommend --equilibrium
 python3 tipping.py --recommend --equilibrium --equilibrium-seasons 10000 --equilibrium-sweeps 5
 ```
+
+The block also prints **what every tipster plays in the upcoming game** under the
+learned rule, with each one's gap to the lead, so you can see the shape of the round
+rather than just your own tip.
 
 It is **approximate, not a proven equilibrium**, and it says so: the report prints how
 many states it learned, the thinnest sample behind any of them, how often it fell back

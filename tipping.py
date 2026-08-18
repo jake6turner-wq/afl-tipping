@@ -1112,6 +1112,34 @@ class _ShiftedPolicy:
         return self.inner(t + self.offset, standing)
 
 
+def field_tips(
+    me: Tipster,
+    rivals: Sequence[Tipster],
+    games: Sequence[Game],
+    t: int,
+    decide,
+) -> List[Tuple[str, str, str, int]]:
+    """What every tipster plays at game `t` from today's standings.
+
+    Returns (name, "F"/"D", the team that means, points behind the lead) with me
+    first. The decision rule is whatever is passed in, so this reads the
+    equilibrium policy when one has been solved and the level-0 rule otherwise.
+    """
+    scores = [me.points] + [r.points for r in rivals]
+    errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
+    names = [me.name] + [r.name for r in rivals]
+    acts = _actions(scores, errors, t, decide)
+
+    game = games[t]
+    favourite = game.home if game.home_odds <= game.away_odds else game.away
+    underdog = underdog_name(game)
+    top = max(scores)
+    return [
+        (names[i], acts[i], favourite if acts[i] == "F" else underdog, scores[i] - top)
+        for i in range(len(names))
+    ]
+
+
 def simulate_contingency(
     me: Tipster,
     rivals: Sequence[Tipster],
@@ -1608,6 +1636,25 @@ def report(
             used = "%.1f%% of lookups" % (100.0 * eq_policy.hits / total)
         print("    learned rule applied to : %s" % used)
         print("    fell back to level-0    : %d lookups" % eq_policy.misses)
+        board = field_tips(me, rivals, games, 0, eq_policy)
+        print()
+        print("    What the whole field plays at %s in equilibrium:" % games[0].game_id)
+        print()
+        for name, action, team, gap in board:
+            marker = "   <-- you" if name == me.name else ""
+            print("        %-16s %-4s %-20s %+3d%s"
+                  % (name, "dog" if action == "D" else "fav", team, gap, marker))
+        print()
+        mine = next(a for n, a, _, _ in board if n == me.name)
+        if mine != sim.action:
+            mine_team = fav0 if mine == "F" else dog0
+            print("    Note: the learned rule plays %s for you here, but the headline"
+                  % mine_team)
+            print("    recommends %s. The headline tested BOTH branches over %d seasons;"
+                  % (chosen, sim.n_seasons))
+            print("    this row is a single table entry off far fewer, so trust the")
+            print("    headline and read the disagreement as the call being close.")
+            print()
         if not eq_policy.settled:
             print()
             print("    *** WARNING: the final sweep was still changing actions, so")
@@ -1762,47 +1809,6 @@ def report(
         print("    *** Treat this decision as genuinely marginal. ***")
     print()
 
-    # ---- Margin tip ------------------------------------------------------------
-    print(rule())
-    if margin_indices:
-        print("MARGIN TIP  (%s)  [exact grouped solve]" % games[margin_indices[0]].game_id)
-    else:
-        print("MARGIN TIP  (none remaining)")
-    print(rule())
-    margin_rows = []
-    if margin_indices:
-        line0 = margin_lines[0]
-        best_tip, best_val = None, -1.0
-        for offset in range(-20, 21, 5):
-            tips = list(margin_lines)
-            tips[0] = line0 + offset
-            cb = CountbackModel(me, rivals, margin_lines, my_margin_tips=tips,
-                                tau=tau, n_sims=max(20_000, n_sims // 4), seed=seed)
-            sol = solve_joint(me, rivals, p_fav, groups, cb)
-            margin_rows.append((line0 + offset, offset, sol.p_win))
-            if sol.p_win > best_val:
-                best_tip, best_val = line0 + offset, sol.p_win
-        on_line = next(v for tip, offset, v in margin_rows if offset == 0)
-        # Only call a winner if it beats the line by more than the sweep's own noise.
-        MEANINGFUL = 0.0025
-        print("    Line for %s is %+.0f. Win probability by your margin tip:" %
-              (games[margin_indices[0]].game_id, line0))
-        for tip, offset, v in margin_rows:
-            marker = "  <-- best" if tip == best_tip else ""
-            print("      tip %+6.0f  (line %+3d)   P(win) = %s%s" % (tip, offset, pct(v), marker))
-        print()
-        if best_val - on_line > MEANINGFUL:
-            print("    >>> RECOMMENDATION: tip %+.0f  (beats the line by %s)" %
-                  (best_tip, pct(best_val - on_line)))
-        else:
-            print("    >>> RECOMMENDATION: tip the line, %+.0f" % line0)
-            print("    The curve is flat to within %s across the whole sweep, so the" %
-                  pct(best_val - on_line))
-            print("    apparent 'best' is inside the Monte Carlo noise. Tipping the line")
-            print("    minimises expected error (the median minimises E|M-m|), and your")
-            print("    margin lead is your single most valuable asset -- protect it.")
-    print()
-
     print(rule("="))
     print("ASSUMPTIONS  (see docs/superpowers/specs/ for the full list)")
     print(rule("="))
@@ -1829,7 +1835,6 @@ def report(
         "fav_names": fav_names,
         "baselines": rows,
         "sensitivity": sens_rows,
-        "margin_rows": margin_rows,
         "countback": countback,
         "groups": groups,
         "winners": winners,
@@ -1871,9 +1876,6 @@ def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
         w.writerow(["baseline", "this engine", "%.6f" % sol.p_win, "optimal"])
         for m, pf0, v, act in result["sensitivity"]:   # type: ignore[union-attr]
             w.writerow(["devig", m, "%.6f" % v, "p_fav_game1=%.6f action=%s" % (pf0, act)])
-        for tip, offset, v in result["margin_rows"]:   # type: ignore[union-attr]
-            w.writerow(["margin", "%+.0f" % tip, "%.6f" % v, "line%+d" % offset])
-        cb: CountbackModel = result["countback"]  # type: ignore[assignment]
         w.writerow(["winner", "_seasons", str(result["n_seasons"]), "simulated seasons"])
         for idx, prob in sim.first_deviation:
             if idx is None:

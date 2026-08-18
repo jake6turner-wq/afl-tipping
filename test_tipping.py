@@ -751,6 +751,32 @@ class TestEquilibriumSolver(unittest.TestCase):
         self.assertLess(heavy, even / 2.0,
                         "near-certainties should scatter far less than coin flips")
 
+    def test_the_field_board_covers_everyone_for_the_next_game(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        pol = self._solve(ME, RIVALS, games)
+        board = T.field_tips(ME, RIVALS, games, 0, pol)
+        self.assertEqual([row[0] for row in board],
+                         [ME.name] + [r.name for r in RIVALS])
+        for name, action, team, gap in board:
+            self.assertIn(action, ("F", "D"))
+            self.assertIn(team, (games[0].home, games[0].away))
+            self.assertIsInstance(gap, int)
+
+    def test_the_field_board_names_the_team_the_action_means(self):
+        # Home is the favourite here, so "F" must read as the home side.
+        games = [_game("G0", 1.4, 3.0)]
+        pol = self._solve(ME, RIVALS, games, n_seasons=800)
+        for _, action, team, _ in T.field_tips(ME, RIVALS, games, 0, pol):
+            self.assertEqual(team, games[0].home if action == "F" else games[0].away)
+
+    def test_the_field_board_reports_the_gap_to_the_lead(self):
+        leader = T.Tipster("Top", ME.points + 3, 100)
+        games = [_game("G0", 1.6, 2.4)]
+        pol = self._solve(ME, [leader], games, n_seasons=800)
+        board = dict((row[0], row[3]) for row in T.field_tips(ME, [leader], games, 0, pol))
+        self.assertEqual(board["Top"], 0, "the leader is level with the lead")
+        self.assertEqual(board[ME.name], -3)
+
     def test_the_same_seed_learns_the_same_policy(self):
         games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
         a = self._solve(ME, RIVALS, games)
