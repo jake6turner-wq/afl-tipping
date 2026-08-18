@@ -779,6 +779,13 @@ class SimulatedRecommendation:
     n_seasons: int
     stderr_level: float                           # on any single probability
     stderr_edge: float                            # on the favourite-minus-dog edge
+    # How much this one result matters: each branch split by whether the team I
+    # tipped actually won. "hit" = my tip came in, "miss" = it did not.
+    p_result_favourite: float                     # share of seasons the fav won
+    p_win_favourite_if_hit: float
+    p_win_favourite_if_miss: float
+    p_win_underdog_if_hit: float
+    p_win_underdog_if_miss: float
     # (game index or None for "never", probability) -- likeliest first, "never" last
     first_deviation: List[Tuple[Optional[int], float]]
 
@@ -869,6 +876,10 @@ def simulate_branches(
     rng = random.Random(seed)
     wins = {"F": [0.0] * n, "D": [0.0] * n}
     deviations: Dict[str, Dict[Optional[int], int]] = {"F": {}, "D": {}}
+    # my wins split by whether the favourite won the NEXT game
+    split = {("F", True): 0.0, ("F", False): 0.0,
+             ("D", True): 0.0, ("D", False): 0.0}
+    fav_won_count = 0
     diff_sum = 0.0
     diff_sq = 0.0
 
@@ -885,8 +896,11 @@ def simulate_branches(
             for i in contenders:
                 row[i] += share
             mine[branch] = share if 0 in contenders else 0.0
+            split[(branch, results[0])] += mine[branch]
             hist = deviations[branch]
             hist[first_dev] = hist.get(first_dev, 0) + 1
+        if results[0]:
+            fav_won_count += 1
         d = mine["F"] - mine["D"]
         diff_sum += d
         diff_sq += d * d
@@ -899,6 +913,10 @@ def simulate_branches(
     table_f, table_d = table_of("F"), table_of("D")
     p_f = wins["F"][0] / n_seasons
     p_d = wins["D"][0] / n_seasons
+
+    n_hit = fav_won_count
+    n_miss = n_seasons - fav_won_count
+    p_result_fav = n_hit / n_seasons
 
     mean_d = diff_sum / n_seasons
     variance = max(0.0, diff_sq / n_seasons - mean_d * mean_d)
@@ -924,6 +942,13 @@ def simulate_branches(
         n_seasons=n_seasons,
         stderr_level=math.sqrt(0.25 / n_seasons),
         stderr_edge=stderr_edge,
+        p_result_favourite=p_result_fav,
+        # Tipping the favourite "hits" when the favourite wins; tipping the dog
+        # hits when it does not. Same result, opposite meaning.
+        p_win_favourite_if_hit=(split[("F", True)] / n_hit) if n_hit else 0.0,
+        p_win_favourite_if_miss=(split[("F", False)] / n_miss) if n_miss else 0.0,
+        p_win_underdog_if_hit=(split[("D", False)] / n_miss) if n_miss else 0.0,
+        p_win_underdog_if_miss=(split[("D", True)] / n_hit) if n_hit else 0.0,
         first_deviation=first_deviation,
     )
 
@@ -1556,8 +1581,30 @@ def report(
     print("Favourite   : %-22s  P(win) = %s   [%s devig]" % (fav0, pct(p_fav[0]), method))
     print("Underdog    : %-22s  P(win) = %s" % (dog0, pct(1.0 - p_fav[0])))
     print()
+    p_hit = sim.p_result_favourite
     print("  Tip the FAVOURITE (%-18s)  ->  P(win comp) = %s" % (fav0, pct(sim.p_win_favourite)))
+    print("      %-18s wins  (%s of seasons)  ->  you win the comp %s"
+          % (fav0, pct(p_hit).strip(), pct(sim.p_win_favourite_if_hit).strip()))
+    print("      %-18s loses (%s of seasons)  ->  you win the comp %s"
+          % (fav0, pct(1.0 - p_hit).strip(), pct(sim.p_win_favourite_if_miss).strip()))
+    print()
     print("  Tip the UNDERDOG  (%-18s)  ->  P(win comp) = %s" % (dog0, pct(sim.p_win_underdog)))
+    print("      %-18s wins  (%s of seasons)  ->  you win the comp %s"
+          % (dog0, pct(1.0 - p_hit).strip(), pct(sim.p_win_underdog_if_hit).strip()))
+    print("      %-18s loses (%s of seasons)  ->  you win the comp %s"
+          % (dog0, pct(p_hit).strip(), pct(sim.p_win_underdog_if_miss).strip()))
+    print()
+    swing_f = abs(sim.p_win_favourite_if_hit - sim.p_win_favourite_if_miss)
+    swing_d = abs(sim.p_win_underdog_if_hit - sim.p_win_underdog_if_miss)
+    print("      How much this result matters depends entirely on what you tip:")
+    print("        tipping %-18s the result moves you %s"
+          % (fav0 + ",", pct(swing_f).strip()))
+    print("        tipping %-18s the result moves you %s"
+          % (dog0 + ",", pct(swing_d).strip()))
+    if swing_f < swing_d / 4.0:
+        print("      Going with the field is the low-variance play -- the result barely")
+        print("      changes your position because everyone moves together. Taking the")
+        print("      dog is the opposite: it puts this game's result in charge.")
     print()
     edge = abs(sim.p_win_underdog - sim.p_win_favourite)
     chosen = dog0 if sim.action == "D" else fav0
@@ -1864,6 +1911,16 @@ def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
                     "simulated"])
         w.writerow(["next", "p_win_if_underdog", "%.6f" % sim.p_win_underdog,
                     "simulated"])
+        w.writerow(["next", "p_result_favourite", "%.6f" % sim.p_result_favourite,
+                    "share of seasons the favourite wins"])
+        w.writerow(["next", "p_win_favourite_if_hit", "%.6f" % sim.p_win_favourite_if_hit,
+                    "tipped the favourite and it won"])
+        w.writerow(["next", "p_win_favourite_if_miss", "%.6f" % sim.p_win_favourite_if_miss,
+                    "tipped the favourite and it lost"])
+        w.writerow(["next", "p_win_underdog_if_hit", "%.6f" % sim.p_win_underdog_if_hit,
+                    "tipped the underdog and it won"])
+        w.writerow(["next", "p_win_underdog_if_miss", "%.6f" % sim.p_win_underdog_if_miss,
+                    "tipped the underdog and it lost"])
         w.writerow(["next", "recommended",
                     fav_names[0] if sim.action == "F" else underdog_name(games[0]),
                     "edge %.6f +/- %.6f" % (

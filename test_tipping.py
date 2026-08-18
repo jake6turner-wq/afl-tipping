@@ -572,6 +572,46 @@ class TestSimulatedRecommendation(unittest.TestCase):
         r = self._branches(chaser, rivals, games, n_seasons=800)
         self.assertLess(dict(r.first_deviation).get(None, 0.0), 0.05)
 
+    def test_each_branch_splits_by_the_result_and_reconciles(self):
+        # The whole point: P(win) = P(result) * P(win | result) summed over both
+        # results. If that identity does not hold the breakdown is decorative.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(5)]
+        r = self._branches(ME, RIVALS, games, n_seasons=3000)
+        p_hit = r.p_result_favourite
+        recomposed_f = (p_hit * r.p_win_favourite_if_hit
+                        + (1.0 - p_hit) * r.p_win_favourite_if_miss)
+        recomposed_d = ((1.0 - p_hit) * r.p_win_underdog_if_hit
+                        + p_hit * r.p_win_underdog_if_miss)
+        self.assertAlmostEqual(recomposed_f, r.p_win_favourite, places=9)
+        self.assertAlmostEqual(recomposed_d, r.p_win_underdog, places=9)
+
+    def test_the_conditionals_are_probabilities(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        r = self._branches(ME, RIVALS, games, n_seasons=1500)
+        for v in (r.p_result_favourite, r.p_win_favourite_if_hit,
+                  r.p_win_favourite_if_miss, r.p_win_underdog_if_hit,
+                  r.p_win_underdog_if_miss):
+            self.assertTrue(0.0 <= v <= 1.0)
+
+    def test_getting_your_tip_right_is_never_worse(self):
+        # Landing your tip cannot leave you worse off than missing it. Allow a
+        # sampling tolerance: when you tip with the field the two conditionals are
+        # nearly identical -- everyone moves together -- so the gap is genuinely
+        # inside the noise rather than comfortably positive.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(5)]
+        r = self._branches(ME, RIVALS, games, n_seasons=4000)
+        tol = 3.0 * math.sqrt(0.25 / 4000)
+        self.assertGreaterEqual(r.p_win_favourite_if_hit,
+                                r.p_win_favourite_if_miss - tol)
+        self.assertGreaterEqual(r.p_win_underdog_if_hit,
+                                r.p_win_underdog_if_miss - tol)
+
+    def test_the_sampled_result_rate_tracks_the_market(self):
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        r = self._branches(ME, RIVALS, games, n_seasons=6000)
+        self.assertAlmostEqual(r.p_result_favourite, p_fav[0], delta=0.03)
+
     def test_it_is_reproducible(self):
         games = [_game("G%d" % i, 1.5, 2.6) for i in range(4)]
         a = self._branches(ME, RIVALS, games, n_seasons=1500, seed=8)

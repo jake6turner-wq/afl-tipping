@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 114 tests, ~12s
+python3 test_tipping.py                       # 118 tests, ~13s
 ```
 
 ## Input sets
@@ -126,6 +126,11 @@ on it. Cells whose two branches sit inside the sampling error are marked
 `too close to call` instead of being given a spurious winner. It costs roughly 15
 extra simulations, so it runs at `--contingency-seasons` (default 6000) rather than
 the headline's 60000, and `--explain` takes about a minute.
+
+The recommendation is broken down by **what actually happens in the next game**, so
+you can see how much this one result decides. Tipping with the field is low variance
+(everyone moves together, so the result barely changes your position); taking the dog
+puts the season on one game. On the live board those two swings were 0.2% and 58.2%.
 
 ### `--equilibrium`
 
