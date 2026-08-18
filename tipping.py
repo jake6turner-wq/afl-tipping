@@ -1073,6 +1073,22 @@ def solve_equilibrium(
     return policy
 
 
+class _ShiftedPolicy:
+    """A decision rule viewed from a later start game.
+
+    `simulate_contingency` slices the fixture to `games[t:]`, so inside that slice
+    the first game is index 0. A learned policy is keyed by the ABSOLUTE game index,
+    so it has to be shifted back or every lookup misses.
+    """
+
+    def __init__(self, inner, offset: int):
+        self.inner = inner
+        self.offset = offset
+
+    def __call__(self, t: int, standing) -> str:
+        return self.inner(t + self.offset, standing)
+
+
 def simulate_contingency(
     me: Tipster,
     rivals: Sequence[Tipster],
@@ -1107,7 +1123,8 @@ def simulate_contingency(
             shifted = Tipster(me.name, me.points + d, me.margin_error, is_me=True)
             cells[(t, d)] = simulate_branches(
                 shifted, rivals, games[t:], p_fav[t:], n_seasons=n_seasons,
-                seed=seed, reluctance=reluctance, tau=tau, decide=decide,
+                seed=seed, reluctance=reluctance, tau=tau,
+                decide=None if decide is None else _ShiftedPolicy(decide, t),
             )
     return cells
 

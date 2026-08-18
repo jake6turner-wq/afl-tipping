@@ -705,6 +705,23 @@ class TestEquilibriumSolver(unittest.TestCase):
         if pol.n_states:
             self.assertGreaterEqual(pol.min_samples, 20)
 
+    def test_the_contingency_grid_queries_absolute_game_indices(self):
+        # simulate_contingency slices games[t:], so inside the slice the first game
+        # is index 0. A learned policy is keyed by the ABSOLUTE index, so without a
+        # shift every cell beyond the first misses its whole policy.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(4)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        seen = []
+
+        def spy(t, standing):
+            seen.append(t)
+            return "F"
+
+        T.simulate_contingency(ME, RIVALS, games, p_fav, n_games=3, deltas=(0,),
+                               n_seasons=40, seed=4, decide=spy)
+        self.assertEqual(max(seen), len(games) - 1,
+                         "the last game must be reached by its absolute index")
+
     def test_the_same_seed_learns_the_same_policy(self):
         games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
         a = self._solve(ME, RIVALS, games)
