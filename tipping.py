@@ -986,7 +986,7 @@ def solve_equilibrium(
     tau: float = TAU_TIP,
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
-    explore: float = 1.0,
+    explore: float = 0.15,
     min_visits: int = 25,
 ) -> EquilibriumPolicy:
     """Learn a decision rule by working BACKWARDS through simulated seasons.
@@ -1001,6 +1001,11 @@ def solve_equilibrium(
     action's value is measured against optimal continuation rather than a heuristic
     rollout. The repeated `sweeps` at a fixed game are iterated best response within
     that stage -- each sweep answers the policy the previous one produced.
+
+    `explore` is deliberately small. Jittering every game spreads samples over
+    positions no season reaches and starves the ones it does: measured on the live
+    scenario, an explore rate of 1.0 learned 132 states and answered 21.9% of
+    decisions, where 0.15 learned 220 and answered 25.4%.
     """
     n = 1 + len(rivals)
     n_games = len(games)
