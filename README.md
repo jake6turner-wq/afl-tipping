@@ -141,16 +141,38 @@ rollout.
 
 `--equilibrium` replaces it with a policy learned by **backward induction over
 simulated seasons**. Working from the last game to the first, it samples seasons that
-reach each game, has one tipster try each action there while the others answer with
+reach each game, has each tipster try both actions there while the others answer with
 the current rule, and finishes on the policy already settled for every later game.
 Because the last game is decided first, each action is judged against later games
 already being played well rather than against a heuristic. Repeated sweeps at a fixed
 game are iterated best response within that stage.
 
+Three things keep the sampling affordable:
+
+- **Both arms share one drawn season.** A position can no longer be reached with one
+  action sampled and the other missing, which used to throw the position away.
+- **Every tipster is scored from that season**, not one randomly chosen focus, so a
+  single rollout yields `2 x field size` samples instead of one.
+- **Games priced under $1.15 are conceded.** If the whole field tips one side, every
+  score moves together and no gap changes, so the game is a differential no-op and
+  skipping it is exact given the assumption. The report names the games it skipped.
+
 ```sh
 python3 tipping.py --recommend --equilibrium
-python3 tipping.py --recommend --equilibrium --equilibrium-seasons 10000 --equilibrium-sweeps 5
+python3 tipping.py --recommend --equilibrium --equilibrium-seasons 10000
 ```
+
+`--equilibrium-seasons` is the dial worth turning; sweeps buy far less. Measured on
+the live set, quadrupling seasons took learned states from 149 to 257 while tripling
+sweeps moved it 149 to 161 for triple the runtime. Coverage, not iteration, is the
+binding constraint.
+
+`--equilibrium-gap-clamp N` buckets point gaps wider than `N` into `N` when keying the
+learned table, so near-identical positions share an entry. It is **lossy** — being one
+clear is not being six clear — so it is off by default. It buys a lot of coverage
+(28.8% of lookups answered to 73.4% at `N=1` on the live set) but the states it pools
+disagree with each other, so the flip rate goes *up*: it is a coarser map, not a
+better-learned one. The fallback always receives the true gaps regardless.
 
 The block also prints **what every tipster plays in the upcoming game** under the
 learned rule, with each one's gap to the lead, so you can see the shape of the round
@@ -158,12 +180,18 @@ rather than just your own tip.
 
 It is **approximate, not a proven equilibrium**, and it says so: the report prints how
 many states it learned, the thinnest sample behind any of them, how often it fell back
-to level-0 on an unseen state, and a `WARNING` if the final sweep was still changing
-actions. Exact equilibrium is not available at any budget — ten players over nine
-games is ~10^10 joint states with 1024 action profiles per node.
+to level-0 on an unseen state, and **what share of states still changed action on the
+final sweep**. That last figure is a rate rather than a boolean, because across
+hundreds of sampled states noise alone flips a few every run — a "nothing moved" flag
+could only ever read False. Under 2% counts as converged.
 
-All ten tipsters share one learned rule keyed by their own situation. That is what
-makes it tractable, and it cannot express an idiosyncratically reckless rival.
+It is not there yet. On the live set it answers about 29% of lookups with 26% of
+states still moving, so treat the section as a cross-check on the headline, not as an
+independent answer. Exact equilibrium is not available at any budget — ten players
+over nine games is ~10^10 joint states with 1024 action profiles per node.
+
+Every tipster shares one learned rule keyed by their own situation. That is what makes
+it tractable, and it cannot express an idiosyncratically reckless rival.
 
 Everything below the table — baselines, chaser sensitivity, devig sensitivity, the
 margin-tip sweep — still comes from the exact grouped solve, which is a different

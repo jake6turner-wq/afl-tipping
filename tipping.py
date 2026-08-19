@@ -80,6 +80,17 @@ TAU_TIP = 10.0        # SD of tipsters' margin tips around the line (ASSUMED, no
 DELTA_CLAMP = 20      # |delta| never needs to exceed the number of remaining games
 RELUCTANCE = 0.10     # rivals' reluctance to back a heavy underdog (ASSUMED, not fitted)
 
+# Below this price the equilibrium solver assumes the whole field tips the favourite.
+# If everyone tips it, every score moves together and the gaps never change, so the
+# game is a differential no-op and costs the solver nothing to skip. The assumption
+# is only that nobody deviates there, and deviating on a $1.06 shot is a hopeless way
+# to chase. ASSUMED, not fitted.
+CONCEDED_ODDS = 1.15
+# Share of states allowed to flip on the final sweep and still count as converged.
+# A strict zero is unreachable: with hundreds of sampled states, noise alone flips a
+# few every time, so a boolean "nothing moved" test can only ever report False.
+SETTLED_TOL = 0.02
+
 
 # --------------------------------------------------------------------------------
 # Schema
@@ -692,6 +703,35 @@ def _standing(scores, errors, i) -> Tuple[Tuple[int, int], ...]:
     return tuple(standing)
 
 
+def _coarse(standing: Tuple[Tuple[int, int], ...],
+            gap_clamp: Optional[int]) -> Tuple[Tuple[int, int], ...]:
+    """Bucket a standing so near-identical positions share one learned entry.
+
+    Gaps wider than `gap_clamp` are merged into it. This is LOSSY -- being one clear
+    is not being six clear -- so it trades accuracy for coverage and is off by
+    default. Note it is only ever applied to the learned table's key: the level-0
+    fallback needs the true multiset to compute its terminal values from, so the two
+    keys have to stay separate.
+    """
+    if gap_clamp is None:
+        return standing
+    return tuple(sorted((max(-gap_clamp, min(gap_clamp, gap)), tiebreak)
+                        for gap, tiebreak in standing))
+
+
+def conceded_games(games: Sequence[Game], threshold: float) -> frozenset:
+    """Indices of games priced so short that the whole field is assumed to tip them.
+
+    Everyone tipping the same side moves every score together, so the gaps -- the
+    only thing any decision depends on -- come out unchanged whichever way the game
+    lands. Skipping them is exact given the assumption, not an approximation.
+    """
+    if threshold <= 1.0:
+        return frozenset()
+    return frozenset(t for t, game in enumerate(games)
+                     if min(game.home_odds, game.away_odds) < threshold)
+
+
 def _actions(scores, errors, t, decide) -> List[str]:
     """Each tipster's action given the live standings, using margin errors as
     accumulated so far in this very season.
@@ -973,25 +1013,37 @@ class EquilibriumPolicy:
     than guessing, and the fallbacks are counted.
     """
 
-    def __init__(self, table, fallback, n_seasons, sweeps, min_samples, settled,
-                 thin_states=0):
+    def __init__(self, table, fallback, n_seasons, sweeps, min_samples, flip_rate,
+                 thin_states=0, gap_clamp=None, conceded=frozenset()):
         self.table: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], str] = table
         self.fallback = fallback
         self.n_seasons = n_seasons
         self.sweeps = sweeps
         self.min_samples = min_samples
-        self.settled = settled
+        self.flip_rate = flip_rate
         self.thin_states = thin_states
+        self.gap_clamp = gap_clamp
+        self.conceded = conceded
         self.misses = 0
         self.hits = 0
+        self.conceded_calls = 0
         self.solve_misses = 0
 
     @property
     def n_states(self) -> int:
         return len(self.table)
 
+    @property
+    def settled(self) -> bool:
+        return self.flip_rate <= SETTLED_TOL
+
     def __call__(self, t: int, standing: Tuple[Tuple[int, int], ...]) -> str:
-        hit = self.table.get((t, standing))
+        if t in self.conceded:
+            # Assumed, not learned, so this is neither a hit nor a fallback. Counting
+            # it either way would misreport how much of the table is real.
+            self.conceded_calls += 1
+            return "F"
+        hit = self.table.get((t, _coarse(standing, self.gap_clamp)))
         if hit is not None:
             self.hits += 1
             return hit
@@ -1013,13 +1065,22 @@ def solve_equilibrium(
     clamp: int = DELTA_CLAMP,
     explore: float = 0.15,
     min_visits: int = 25,
+    conceded_odds: float = CONCEDED_ODDS,
+    gap_clamp: Optional[int] = None,
 ) -> EquilibriumPolicy:
     """Learn a decision rule by working BACKWARDS through simulated seasons.
 
-    For each game from the last to the first, sample seasons that reach it, have one
-    focus tipster try each action there while everyone else plays the current rule,
-    and finish the season on the policy already settled for every later game. The
-    action that wins more often becomes the rule at that game.
+    For each game from the last to the first, sample seasons that reach it, have each
+    tipster in turn try both actions there while everyone else plays the current
+    rule, and finish the season on the policy already settled for every later game.
+    The action that wins more often becomes the rule at that game.
+
+    Two things make the sampling pay its way. Both arms are played over the SAME
+    drawn season, so every position that is visited gets both arms rather than a coin
+    flip deciding which one it contributes to -- a state used to be discarded unless
+    both arms independently cleared `min_visits`. And every tipster is scored from
+    that one season instead of a single randomly chosen focus, which multiplies the
+    sample yield by the size of the field for one extra rollout.
 
     Deciding the last game first is what makes this well founded: by the time game
     `t` is judged, games `t+1..end` are already being played optimally, so an
@@ -1037,12 +1098,15 @@ def solve_equilibrium(
     start_scores = [me.points] + [r.points for r in rivals]
     start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
 
+    conceded = conceded_games(games, conceded_odds)
     fallback = _decision_cache(p_fav, reluctance, clamp)
     table: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], str] = {}
-    policy = EquilibriumPolicy(table, fallback, n_seasons, sweeps, 0, True)
+    policy = EquilibriumPolicy(table, fallback, n_seasons, sweeps, 0, 0.0,
+                               gap_clamp=gap_clamp, conceded=conceded)
     rng = random.Random(seed)
     min_samples = None
-    settled = True
+    final_decided = 0
+    final_flipped = 0
     thin = 0
 
     def apply(scores, errors, game, acts, fav_won, drawn):
@@ -1056,6 +1120,9 @@ def solve_equilibrium(
                 errors[j] += abs(actual - rival_tips[j - 1])
 
     for t in range(n_games - 1, -1, -1):
+        if t in conceded:
+            continue      # the whole field tips it, so no gap moves and there is
+                          # nothing here to decide
         for sweep in range(sweeps):
             stats: Dict[Tuple[Tuple[Tuple[int, int], ...], str], List[float]] = {}
             for _ in range(n_seasons):
@@ -1073,25 +1140,30 @@ def solve_equilibrium(
                         acts[j] = _explore_action(rng.random(), p_fav[u])
                     apply(scores, errors, games[u], acts, results[u], margins.get(u))
 
-                # The decision under test: one tipster tries an action at random,
-                # everyone else answers with the rule as it currently stands.
-                focus = rng.randrange(n)
-                standing = _standing(scores, errors, focus)
-                acts = _actions(scores, errors, t, policy)
-                action = "D" if rng.random() < 0.5 else "F"
-                acts[focus] = action
-                apply(scores, errors, games[t], acts, results[t], margins.get(t))
+                # The decision under test. Every tipster is scored, and each is scored
+                # both ways over this one drawn season -- so the two arms differ only
+                # by the action, and no visited position can end up with one arm
+                # sampled and the other missing.
+                base_acts = _actions(scores, errors, t, policy)
+                for focus in range(n):
+                    standing = _coarse(_standing(scores, errors, focus), gap_clamp)
+                    for action in ("F", "D"):
+                        sc, er = list(scores), list(errors)
+                        acts = list(base_acts)
+                        acts[focus] = action
+                        apply(sc, er, games[t], acts, results[t], margins.get(t))
 
-                # Finish on the already-settled policy for every later game.
-                for u in range(t + 1, n_games):
-                    acts = _actions(scores, errors, u, policy)
-                    apply(scores, errors, games[u], acts, results[u], margins.get(u))
+                        # Finish on the already-settled policy for every later game.
+                        for u in range(t + 1, n_games):
+                            apply(sc, er, games[u],
+                                  _actions(sc, er, u, policy),
+                                  results[u], margins.get(u))
 
-                winners = _season_winners(scores, errors)
-                payoff = (1.0 / len(winners)) if focus in winners else 0.0
-                cell = stats.setdefault((standing, action), [0.0, 0])
-                cell[0] += payoff
-                cell[1] += 1
+                        winners = _season_winners(sc, er)
+                        payoff = (1.0 / len(winners)) if focus in winners else 0.0
+                        cell = stats.setdefault((standing, action), [0.0, 0])
+                        cell[0] += payoff
+                        cell[1] += 1
 
             for standing in {s for s, _ in stats}:
                 f = stats.get((standing, "F"))
@@ -1108,16 +1180,19 @@ def solve_equilibrium(
                 min_samples = seen if min_samples is None else min(min_samples, seen)
                 choice = "D" if d[0] / d[1] > f[0] / f[1] else "F"
                 key = (t, standing)
-                if sweep == sweeps - 1 and table.get(key) not in (None, choice):
-                    settled = False   # the final sweep still moved this state
+                if sweep == sweeps - 1:
+                    final_decided += 1
+                    if table.get(key) not in (None, choice):
+                        final_flipped += 1   # the final sweep still moved this state
                 table[key] = choice
 
     policy.min_samples = 0 if min_samples is None else min_samples
-    policy.settled = settled
+    policy.flip_rate = (final_flipped / final_decided) if final_decided else 0.0
     policy.thin_states = thin
     policy.solve_misses = policy.misses
     policy.misses = 0      # from here the counts reflect REPORTING use, not solving
     policy.hits = 0
+    policy.conceded_calls = 0
     return policy
 
 
@@ -1529,6 +1604,7 @@ def report(
     equilibrium: bool = False,
     eq_seasons: int = 4_000,
     eq_sweeps: int = 3,
+    eq_gap_clamp: Optional[int] = None,
 ) -> Dict[str, object]:
     p_fav = []
     fav_names = []
@@ -1561,7 +1637,8 @@ def report(
         print("seasons per game, %d sweeps each..." % eq_sweeps)
         eq_policy = solve_equilibrium(me, rivals, games, p_fav, n_seasons=eq_seasons,
                                       sweeps=eq_sweeps, seed=seed,
-                                      reluctance=reluctance, tau=tau)
+                                      reluctance=reluctance, tau=tau,
+                                      gap_clamp=eq_gap_clamp)
     sim = simulate_branches(me, rivals, games, p_fav, n_seasons=n_seasons,
                             seed=seed, reluctance=reluctance, tau=tau,
                             decide=eq_policy)
@@ -1674,6 +1751,8 @@ def report(
         print()
         print("    states learned          : %d" % eq_policy.n_states)
         print("    seasons per game, sweeps: %d x %d" % (eq_seasons, eq_sweeps))
+        print("    samples per season      : %d (every tipster, both actions)"
+              % (2 * (1 + len(rivals))))
         print("    thinnest state kept     : %d seasons per arm" % eq_policy.min_samples)
         print("    states too thin to keep : %d (left on the level-0 rule)"
               % eq_policy.thin_states)
@@ -1683,6 +1762,15 @@ def report(
             used = "%.1f%% of lookups" % (100.0 * eq_policy.hits / total)
         print("    learned rule applied to : %s" % used)
         print("    fell back to level-0    : %d lookups" % eq_policy.misses)
+        print("    still moving on last    : %.1f%% of states (converged below %.0f%%)"
+              % (100.0 * eq_policy.flip_rate, 100.0 * SETTLED_TOL))
+        if eq_policy.gap_clamp is not None:
+            print("    gaps bucketed at        : +/-%d (lossy: coarser map, wider cover)"
+                  % eq_policy.gap_clamp)
+        if eq_policy.conceded:
+            named = ", ".join(games[t].game_id for t in sorted(eq_policy.conceded))
+            print("    assumed all-favourite   : %s (under $%.2f, so no gap moves)"
+                  % (named, CONCEDED_ODDS))
         board = field_tips(me, rivals, games, 0, eq_policy)
         print()
         print("    What the whole field plays at %s in equilibrium:" % games[0].game_id)
@@ -1704,9 +1792,10 @@ def report(
             print()
         if not eq_policy.settled:
             print()
-            print("    *** WARNING: the final sweep was still changing actions, so")
-            print("    this has NOT converged. Raise --equilibrium-sweeps or")
-            print("    --equilibrium-seasons before leaning on it. ***")
+            print("    *** WARNING: %.1f%% of states still changed action on the final"
+                  % (100.0 * eq_policy.flip_rate))
+            print("    sweep, so this has NOT converged. Raise --equilibrium-seasons")
+            print("    before leaning on it. ***")
         if eq_policy.n_states < eq_policy.thin_states:
             print()
             print("    *** WARNING: more states were too thinly sampled to learn")
@@ -1897,6 +1986,7 @@ def write_csv_outputs(me: Tipster, rivals: List[Tipster], games: List[Game],
     sol: Solution = result["solution"]           # type: ignore[assignment]
     p_fav: List[float] = result["p_fav"]          # type: ignore[assignment]
     fav_names: List[str] = result["fav_names"]    # type: ignore[assignment]
+    cb: CountbackModel = result["countback"]      # type: ignore[assignment]
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["section", "key", "value", "detail"])
@@ -1986,6 +2076,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="sampled seasons per game when solving the equilibrium")
     parser.add_argument("--equilibrium-sweeps", type=int, default=3,
                         help="best-response sweeps per game when solving")
+    parser.add_argument("--equilibrium-gap-clamp", type=int, default=None,
+                        metavar="N",
+                        help="bucket point gaps wider than N into N when keying the "
+                             "learned table. Lossy -- it widens coverage by making "
+                             "the map coarser -- so off by default")
     parser.add_argument("--contingency-seasons", type=int, default=6_000,
                         help="seasons per --explain contingency cell (there are ~15)")
     parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
@@ -2030,7 +2125,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     result = report(me, rivals, games, args.devig, args.explain,
                     args.sims, args.seed, args.tau, paths, args.reluctance,
                     args.sim_seasons, args.contingency_seasons, args.equilibrium,
-                    args.equilibrium_seasons, args.equilibrium_sweeps)
+                    args.equilibrium_seasons, args.equilibrium_sweeps,
+                    args.equilibrium_gap_clamp)
     out = write_csv_outputs(me, rivals, games, result, args.devig, paths)
     print("Wrote %s" % out)
     return 0

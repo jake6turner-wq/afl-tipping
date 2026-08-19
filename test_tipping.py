@@ -781,8 +781,11 @@ class TestEquilibriumSolver(unittest.TestCase):
         def scatter(home_odds, away_odds):
             games = [_game("G%d" % i, home_odds, away_odds) for i in range(4)]
             p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+            # Concession is switched off here on purpose: it would skip the $1.02
+            # fixture outright and there would be no exploration left to measure.
             pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=2000,
-                                      sweeps=1, seed=3, min_visits=10)
+                                      sweeps=1, seed=3, min_visits=10,
+                                      conceded_odds=1.0)
             self.assertGreater(pol.n_states, 0)
             return pol.thin_states
 
@@ -790,6 +793,103 @@ class TestEquilibriumSolver(unittest.TestCase):
         even = scatter(1.95, 1.95)
         self.assertLess(heavy, even / 2.0,
                         "near-certainties should scatter far less than coin flips")
+
+    def test_the_csv_is_written_without_crashing(self):
+        # The countback rows reach for a model the writer never pulled out of the
+        # result dict, so every single run died after printing the whole report.
+        import os
+        import tempfile
+        me = T.Tipster("Jake Turner", 155, 577, is_me=True)
+        rivals = [T.Tipster("Ryan Board", 156, 628)]
+        games = [_game("G0", 1.6, 2.4, margin=True), _game("G1", 1.8, 2.0)]
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = T.SetPaths(name="current",
+                               leaderboard=os.path.join(tmp, "leaderboard.csv"),
+                               fixtures=os.path.join(tmp, "fixtures.csv"),
+                               output_dir=tmp)
+            result = T.report(me, rivals, games, "odds_ratio", False, 2000,
+                              1, T.TAU_TIP, paths, n_seasons=500,
+                              contingency_seasons=200)
+            out = T.write_csv_outputs(me, rivals, games, result, "odds_ratio", paths)
+            with open(out) as fh:
+                body = fh.read()
+        self.assertIn("countback", body)
+
+    def test_both_arms_are_sampled_for_every_visited_state(self):
+        # Playing both arms over the SAME drawn season is what guarantees this: a
+        # state can no longer be reached with one arm sampled and the other missing,
+        # which used to throw the state away. So no state should be discarded for a
+        # missing arm -- only ever for being under the sample bar.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=400,
+                                  sweeps=1, seed=3, min_visits=1)
+        self.assertGreater(pol.n_states, 0)
+        self.assertEqual(pol.thin_states, 0,
+                         "with paired arms nothing can be missing an arm at min 1")
+
+    def test_every_tipster_contributes_a_sample(self):
+        # One season used to yield a single data point from one random focus. Scoring
+        # the whole field multiplies the yield, so the same seasons must learn
+        # strictly more states than a single-focus run could.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=500,
+                                  sweeps=1, seed=3, min_visits=25)
+        # Each season yields 2 arms x the whole field; a state clearing 25 per arm
+        # off 500 seasons is only reachable at that yield.
+        self.assertGreater(pol.n_states, 0)
+        self.assertGreaterEqual(pol.min_samples, 25)
+
+    def test_short_priced_games_are_conceded_not_solved(self):
+        # If everyone tips it, every score moves together and no gap changes, so
+        # there is nothing to decide. The rule must say so without consulting the
+        # table, and without being counted as a learned hit or a fallback.
+        games = [_game("G0", 1.06, 11.0), _game("G1", 1.6, 2.4)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=400,
+                                  sweeps=1, seed=3)
+        self.assertEqual(pol.conceded, frozenset([0]))
+        self.assertFalse(any(t == 0 for t, _ in pol.table),
+                         "a conceded game should never be solved")
+        hits, misses = pol.hits, pol.misses
+        self.assertEqual(pol(0, T._standing([155, 156], [500.0, 600.0], 0)), "F")
+        self.assertEqual((pol.hits, pol.misses), (hits, misses))
+        self.assertEqual(pol.conceded_calls, 1)
+
+    def test_concession_reads_the_price_not_the_favourite_side(self):
+        # The short price can sit on either side of the fixture.
+        games = [_game("G0", 11.0, 1.06), _game("G1", 1.30, 3.6)]
+        self.assertEqual(T.conceded_games(games, T.CONCEDED_ODDS), frozenset([0]))
+        self.assertEqual(T.conceded_games(games, 1.0), frozenset(),
+                         "a threshold at evens must disable the assumption")
+
+    def test_the_coarse_key_buckets_only_the_table_lookup(self):
+        # Clamping is applied to the learned table's key. The fallback needs the true
+        # multiset to compute terminal values from, so it must receive that unchanged.
+        exact = T._standing([155, 161], [500.0, 600.0], 0)
+        self.assertEqual(T._coarse(exact, None), exact)
+        self.assertEqual(T._coarse(exact, 2), ((2, 1),))
+        seen = []
+
+        def fallback(t, standing):
+            seen.append(standing)
+            return "F"
+
+        pol = T.EquilibriumPolicy({}, fallback, 1, 1, 0, 0.0, gap_clamp=2)
+        pol(0, exact)
+        self.assertEqual(seen, [exact], "the fallback must see the true gaps")
+
+    def test_convergence_is_reported_as_a_rate_not_a_boolean(self):
+        # A boolean "nothing moved" can only ever read False across hundreds of
+        # sampled states, so it carries no information. The rate does.
+        games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
+        p_fav = [T.favourite_prob(g, "odds_ratio")[0] for g in games]
+        pol = T.solve_equilibrium(ME, RIVALS, games, p_fav, n_seasons=400,
+                                  sweeps=2, seed=3)
+        self.assertGreaterEqual(pol.flip_rate, 0.0)
+        self.assertLessEqual(pol.flip_rate, 1.0)
+        self.assertEqual(pol.settled, pol.flip_rate <= T.SETTLED_TOL)
 
     def test_the_field_board_covers_everyone_for_the_next_game(self):
         games = [_game("G%d" % i, 1.6, 2.4) for i in range(3)]
