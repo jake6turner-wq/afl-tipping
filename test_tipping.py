@@ -1355,5 +1355,145 @@ class TestNoisyDecisions(unittest.TestCase):
         self.assertEqual(T._as_dog_prob(0.37), 0.37)
 
 
+class TestNoisePreDraw(unittest.TestCase):
+    """Rival noise is luck, so it is drawn once per season and shared by branches."""
+
+    GAMES = [
+        T.Game("G1", "R", "Thu", "A", "B", 1.40, 2.96, 16.5, True, None),
+        T.Game("G2", "R", "Fri", "C", "D", 2.44, 1.56, 10.5, False, None),
+    ]
+    P_FAV = [0.689, 0.616]
+    ME = T.Tipster("Me", 155, 577, is_me=True)
+    RIVALS = [T.Tipster("Leader", 156, 628), T.Tipster("Chaser", 154, 583)]
+
+    def test_draw_season_returns_noise_shaped_per_game_per_tipster(self):
+        rng = random.Random(1)
+        results, margins, noise = T._draw_season(
+            self.GAMES, self.P_FAV, 2, rng.random, rng.gauss, 10.0, 37.0,
+            draw_noise=True)
+        self.assertEqual(len(noise), len(self.GAMES))
+        for row in noise:
+            self.assertEqual(len(row), 3)          # me + two rivals
+            for u in row:
+                self.assertGreaterEqual(u, 0.0)
+                self.assertLess(u, 1.0)
+
+    def test_replaying_one_season_is_reproducible(self):
+        rng = random.Random(7)
+        results, margins, noise = T._draw_season(
+            self.GAMES, self.P_FAV, 2, rng.random, rng.gauss, 10.0, 37.0,
+            draw_noise=True)
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        scores, errors = [155, 156, 154], [577.0, 628.0, 583.0]
+        first = T._play_season(self.GAMES, scores, errors, results, margins,
+                               decide, "F", noise=noise)
+        for _ in range(5):
+            self.assertEqual(
+                T._play_season(self.GAMES, scores, errors, results, margins,
+                               decide, "F", noise=noise),
+                first)
+
+    def test_both_branches_see_the_same_noise(self):
+        # The pairing is the whole point: the only thing that may differ between
+        # the branches is my forced first tip, never the rivals' luck.
+        rng = random.Random(7)
+        _, _, noise = T._draw_season(self.GAMES, self.P_FAV, 2,
+                                     rng.random, rng.gauss, 10.0, 37.0,
+                                     draw_noise=True)
+        seen = {}
+        for branch in ("F", "D"):
+            drawn = []
+
+            class Spy:
+                def __init__(self, inner):
+                    self.inner = inner
+
+                def __call__(self, t, standing):
+                    drawn.append(t)
+                    return self.inner(t, standing)
+
+            decide = Spy(T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                           temperature=0.05))
+            T._play_season(self.GAMES, [155, 156, 154], [577.0, 628.0, 583.0],
+                           [True, False], {}, decide, branch, noise=noise)
+            seen[branch] = list(noise)
+        self.assertEqual(seen["F"], seen["D"])
+
+    def test_simulate_branches_is_deterministic_under_noise(self):
+        kwargs = dict(n_seasons=400, seed=99, temperature=0.05)
+        a = T.simulate_branches(self.ME, self.RIVALS, self.GAMES, self.P_FAV,
+                                **kwargs)
+        b = T.simulate_branches(self.ME, self.RIVALS, self.GAMES, self.P_FAV,
+                                **kwargs)
+        self.assertEqual(a.p_win_favourite, b.p_win_favourite)
+        self.assertEqual(a.p_win_underdog, b.p_win_underdog)
+
+    def test_zero_temperature_matches_the_default(self):
+        quiet = T.simulate_branches(self.ME, self.RIVALS, self.GAMES, self.P_FAV,
+                                    n_seasons=800, seed=5, temperature=0.0)
+        default = T.simulate_branches(self.ME, self.RIVALS, self.GAMES,
+                                      self.P_FAV, n_seasons=800, seed=5)
+        self.assertEqual(quiet.p_win_favourite, default.p_win_favourite)
+        self.assertEqual(quiet.p_win_underdog, default.p_win_underdog)
+
+    def test_noise_off_does_not_touch_the_rng_stream(self):
+        # Drawing noise unconditionally would shift every later draw, so a run
+        # with noise off would stop reproducing pre-feature numbers.
+        rng_a = random.Random(4)
+        quiet = T._draw_season(self.GAMES, self.P_FAV, 2, rng_a.random,
+                               rng_a.gauss, 10.0, 37.0)
+        rng_b = random.Random(4)
+        loud = T._draw_season(self.GAMES, self.P_FAV, 2, rng_b.random,
+                              rng_b.gauss, 10.0, 37.0, draw_noise=True)
+        self.assertIsNone(quiet[2])
+        self.assertIsNotNone(loud[2])
+        self.assertEqual(quiet[0], loud[0])          # same results
+        self.assertNotEqual(quiet[1], loud[1])       # margins necessarily shift
+
+        # The property that matters: noise off consumes exactly the draws it
+        # always did, so nothing downstream in the stream moves.
+        def counted(seed, draw_noise):
+            rng = random.Random(seed)
+            calls = []
+
+            def rand():
+                calls.append(1)
+                return rng.random()
+
+            T._draw_season(self.GAMES, self.P_FAV, 2, rand, rng.gauss,
+                           10.0, 37.0, draw_noise=draw_noise)
+            return len(calls)
+
+        n_games, n_tipsters = len(self.GAMES), 3
+        self.assertEqual(counted(4, False), n_games)
+        self.assertEqual(counted(4, True), n_games + n_games * n_tipsters)
+
+    def test_the_bloc_actually_breaks(self):
+        # Two rivals in identical positions must sometimes tip differently within
+        # one season. Under the old hard argmax they never could.
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        rng = random.Random(3)
+        split = False
+        for _ in range(200):
+            _, _, noise = T._draw_season(self.GAMES, self.P_FAV, 2,
+                                         rng.random, rng.gauss, 10.0, 37.0,
+                                         draw_noise=True)
+            acts = T._actions([155, 154, 154], [577.0, 590.0, 590.0], 0,
+                              decide, draws=noise[0])
+            if acts[1] != acts[2]:
+                split = True
+                break
+        self.assertTrue(split, "identically placed rivals never disagreed")
+
+    def test_noise_changes_the_field(self):
+        quiet = T.simulate_branches(self.ME, self.RIVALS, self.GAMES, self.P_FAV,
+                                    n_seasons=3000, seed=11, temperature=0.0)
+        noisy = T.simulate_branches(self.ME, self.RIVALS, self.GAMES, self.P_FAV,
+                                    n_seasons=3000, seed=11, temperature=0.15)
+        self.assertNotEqual(quiet.table_favourite, noisy.table_favourite)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

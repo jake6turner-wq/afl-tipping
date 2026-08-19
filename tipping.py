@@ -830,24 +830,40 @@ def _actions(scores, errors, t, decide, draws=None, decide_me=None) -> List[str]
     return acts
 
 
-def _draw_season(games, p_fav, n_rivals, random_f, gauss, tau, sigma):
+def _draw_season(games, p_fav, n_rivals, random_f, gauss, tau, sigma,
+                 draw_noise=False):
     """Pre-draw one season's randomness so both branches can replay it identically.
 
     The draws never depend on anyone's tips, so pulling them up front costs nothing
     and buys a paired comparison: the only difference between the two branches is
     my forced first tip, not the luck.
+
+    Rival decision noise is luck too, so it is drawn here rather than at the point
+    of decision. Both branches then compare the SAME uniform against whatever
+    probability their own standings produce -- common random numbers. Drawing it
+    inside the replay instead would decouple the branches and inflate the reported
+    edge error.
+
+    It is drawn only when `draw_noise` is set. Drawing it unconditionally would
+    consume RNG draws that shift every later draw in the stream, so a run with
+    noise switched off would stop reproducing the numbers it produced before the
+    feature existed.
     """
+    n = n_rivals + 1
     results = [random_f() < p_fav[t] for t in range(len(games))]
+    noise = None
+    if draw_noise:
+        noise = [[random_f() for _ in range(n)] for _ in range(len(games))]
     margins = {}
     for t, game in enumerate(games):
         if game.is_margin_game and game.line_fav is not None:
             margins[t] = (gauss(game.line_fav, sigma),
                           [gauss(game.line_fav, tau) for _ in range(n_rivals)])
-    return results, margins
+    return results, margins, noise
 
 
 def _play_season(games, start_scores, start_errors, results, margins, decide,
-                 force_first_me):
+                 force_first_me, noise=None, decide_me=None):
     """Replay one pre-drawn season.
 
     Returns (final scores, final margin errors, index of my first deviation or
@@ -860,7 +876,9 @@ def _play_season(games, start_scores, start_errors, results, margins, decide,
     first_deviation = None
 
     for t, game in enumerate(games):
-        acts = _actions(scores, errors, t, decide)
+        acts = _actions(scores, errors, t, decide,
+                        draws=None if noise is None else noise[t],
+                        decide_me=decide_me)
         if t == 0 and force_first_me is not None:
             acts[0] = force_first_me
         if first_deviation is None and acts[0] == "D":
@@ -924,6 +942,7 @@ def simulate_seasons(
     tau: float = TAU_TIP,
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
+    temperature: float = 0.0,
     force_first_me: Optional[str] = None,
     decide: Optional[Callable[[int, Tuple[Tuple[int, int], ...]], str]] = None,
 ) -> List[Tuple[str, float]]:
@@ -939,16 +958,23 @@ def simulate_seasons(
     start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
     n = len(names)
 
+    decide_me = None
     if decide is None:
-        decide = _decision_cache(p_fav, reluctance, clamp)
+        decide = _decision_cache(p_fav, reluctance, clamp, temperature)
+        if temperature > 0.0:
+            # Rivals act noisily and their own DP knows it. Mine must not: the
+            # recommendation is a best response to a noisy field, not itself noisy.
+            decide_me = _decision_cache(p_fav, reluctance, clamp, 0.0)
     rng = random.Random(seed)
     wins = [0.0] * n
 
     for _ in range(n_seasons):
-        results, margins = _draw_season(games, p_fav, n - 1, rng.random, rng.gauss,
-                                        tau, sigma)
+        results, margins, noise = _draw_season(games, p_fav, n - 1, rng.random,
+                                               rng.gauss, tau, sigma,
+                                               draw_noise=temperature > 0.0)
         scores, errors, _ = _play_season(games, start_scores, start_errors, results,
-                                         margins, decide, force_first_me)
+                                         margins, decide, force_first_me,
+                                         noise=noise, decide_me=decide_me)
         contenders = _season_winners(scores, errors)
         share = 1.0 / len(contenders)
         for i in contenders:
@@ -970,6 +996,7 @@ def simulate_branches(
     tau: float = TAU_TIP,
     sigma: float = SIGMA_MARGIN,
     clamp: int = DELTA_CLAMP,
+    temperature: float = 0.0,
     decide: Optional[Callable[[int, Tuple[Tuple[int, int], ...]], str]] = None,
 ) -> SimulatedRecommendation:
     """Decide the next tip from the simulation itself, and report the race under it.
@@ -994,8 +1021,13 @@ def simulate_branches(
     start_errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
     n = len(names)
 
+    decide_me = None
     if decide is None:
-        decide = _decision_cache(p_fav, reluctance, clamp)
+        decide = _decision_cache(p_fav, reluctance, clamp, temperature)
+        if temperature > 0.0:
+            # Rivals act noisily and their own DP knows it. Mine must not: the
+            # recommendation is a best response to a noisy field, not itself noisy.
+            decide_me = _decision_cache(p_fav, reluctance, clamp, 0.0)
     rng = random.Random(seed)
     wins = {"F": [0.0] * n, "D": [0.0] * n}
     deviations: Dict[str, Dict[Optional[int], int]] = {"F": {}, "D": {}}
@@ -1007,12 +1039,14 @@ def simulate_branches(
     diff_sq = 0.0
 
     for _ in range(n_seasons):
-        results, margins = _draw_season(games, p_fav, n - 1, rng.random, rng.gauss,
-                                        tau, sigma)
+        results, margins, noise = _draw_season(games, p_fav, n - 1, rng.random,
+                                               rng.gauss, tau, sigma,
+                                               draw_noise=temperature > 0.0)
         mine = {}
         for branch in ("F", "D"):
             scores, errors, first_dev = _play_season(
-                games, start_scores, start_errors, results, margins, decide, branch)
+                games, start_scores, start_errors, results, margins, decide, branch,
+                noise=noise, decide_me=decide_me)
             contenders = _season_winners(scores, errors)
             share = 1.0 / len(contenders)
             row = wins[branch]
@@ -1217,8 +1251,11 @@ def solve_equilibrium(
         for sweep in range(sweeps):
             stats: Dict[Tuple[Tuple[Tuple[int, int], ...], str], List[float]] = {}
             for _ in range(n_seasons):
-                results, margins = _draw_season(games, p_fav, n - 1, rng.random,
-                                                rng.gauss, tau, sigma)
+                # `noise` is unused here: the equilibrium learner plays the learned
+                # rule, which stores chosen actions rather than probabilities, so
+                # every tipster in a sweep is deterministic. See the spec.
+                results, margins, _noise = _draw_season(
+                    games, p_fav, n - 1, rng.random, rng.gauss, tau, sigma)
                 scores, errors = list(start_scores), list(start_errors)
 
                 # Reach game t under the current rule, jittered at the market price
