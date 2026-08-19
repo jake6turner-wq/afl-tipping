@@ -16,7 +16,7 @@ python3 tipping.py --make-template            # write inputs/current/*.csv
 # ... fill in inputs/current/fixtures.csv ...
 python3 tipping.py --recommend                # the next decision
 python3 tipping.py --recommend --explain      # + contingency table for 3 games
-python3 test_tipping.py                       # 118 tests, ~13s
+python3 test_tipping.py                       # 153 tests, ~31s
 ```
 
 ## Input sets
@@ -47,7 +47,8 @@ pairs a leaderboard from one world with fixtures from another.
 
 Useful flags: `--devig {proportional,odds_ratio,shin}` (default `odds_ratio`),
 `--tau` (rival margin-tip dispersion), `--reluctance` (rivals' aversion to heavy
-underdogs), `--sims`, `--seed`, `--set`, `--fixtures`, `--leaderboard`.
+underdogs), `--rival-noise` (how uncertainly rivals act on a thin edge), `--sims`,
+`--seed`, `--set`, `--fixtures`, `--leaderboard`.
 
 ## Filling in `inputs/current/fixtures.csv`
 
@@ -206,6 +207,14 @@ against the headline.
 - **`reluctance = 0.10` is assumed, not fitted.** It was calibrated to separate the
   85%+ games from the 58-76% band on this fixture, not measured from anyone's actual
   tipping. Sweep it with `--reluctance` and check the recommendation holds.
+- **`rival-noise = 0.05` is assumed, not fitted.** Rivals used to act with total
+  certainty on any edge, so a 1.6-point preference put the whole chasing pack on
+  the same underdog and made "they'll be on this dog too, so taking it covers me"
+  look like a real argument. They now take the dog with a probability logistic in
+  that edge, drawn independently per rival, so identically placed rivals can tip
+  differently. Sweep it with `--rival-noise`; `0` restores the old certain
+  behaviour exactly. It does **not** reach `--equilibrium`, whose learned rule
+  stores chosen actions rather than probabilities.
 - **The chaser model moves the answer by ~7 points.** A pure level-0 chaser believes
   the field is frozen and stops deviating once they're far enough ahead, which
   flatters you. `CHASER MODEL SENSITIVITY` reports the relentless variants; check

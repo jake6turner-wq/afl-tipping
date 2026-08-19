@@ -897,7 +897,7 @@ class TestEquilibriumSolver(unittest.TestCase):
         board = T.field_tips(ME, RIVALS, games, 0, pol)
         self.assertEqual([row[0] for row in board],
                          [ME.name] + [r.name for r in RIVALS])
-        for name, action, team, gap in board:
+        for name, action, team, gap, _q in board:
             self.assertIn(action, ("F", "D"))
             self.assertIn(team, (games[0].home, games[0].away))
             self.assertIsInstance(gap, int)
@@ -906,7 +906,7 @@ class TestEquilibriumSolver(unittest.TestCase):
         # Home is the favourite here, so "F" must read as the home side.
         games = [_game("G0", 1.4, 3.0)]
         pol = self._solve(ME, RIVALS, games, n_seasons=800)
-        for _, action, team, _ in T.field_tips(ME, RIVALS, games, 0, pol):
+        for _, action, team, _, _q in T.field_tips(ME, RIVALS, games, 0, pol):
             self.assertEqual(team, games[0].home if action == "F" else games[0].away)
 
     def test_the_field_board_reports_the_gap_to_the_lead(self):
@@ -1493,6 +1493,43 @@ class TestNoisePreDraw(unittest.TestCase):
         noisy = T.simulate_branches(self.ME, self.RIVALS, self.GAMES, self.P_FAV,
                                     n_seasons=3000, seed=11, temperature=0.15)
         self.assertNotEqual(quiet.table_favourite, noisy.table_favourite)
+
+
+class TestNoiseSurface(unittest.TestCase):
+    """The flag, the reported probability, and the assumptions block."""
+
+    GAMES = [
+        T.Game("G1", "R", "Thu", "A", "B", 1.40, 2.96, 16.5, True, None),
+        T.Game("G2", "R", "Fri", "C", "D", 2.44, 1.56, 10.5, False, None),
+    ]
+    P_FAV = [0.689, 0.616]
+    ME = T.Tipster("Me", 155, 577, is_me=True)
+    RIVALS = [T.Tipster("Leader", 156, 628), T.Tipster("Chaser", 154, 583)]
+
+    def test_field_tips_reports_the_probability(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        rows = T.field_tips(self.ME, self.RIVALS, self.GAMES, 0, decide)
+        for name, act, team, gap, q in rows:
+            self.assertIn(act, ("F", "D"))
+            self.assertGreaterEqual(q, 0.0)
+            self.assertLessEqual(q, 1.0)
+            self.assertEqual(act, "D" if q > 0.5 else "F")
+
+    def test_field_tips_is_certain_at_zero_temperature(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP)
+        for _, _, _, _, q in T.field_tips(self.ME, self.RIVALS, self.GAMES, 0,
+                                          decide):
+            self.assertIn(q, (0.0, 1.0))
+
+    def test_cli_exposes_rival_noise(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            with self.assertRaises(SystemExit):
+                T.main(["--help"])
+        self.assertIn("--rival-noise", buf.getvalue())
 
 
 if __name__ == "__main__":

@@ -1349,21 +1349,27 @@ def field_tips(
 ) -> List[Tuple[str, str, str, int]]:
     """What every tipster plays at game `t` from today's standings.
 
-    Returns (name, "F"/"D", the team that means, points behind the lead) with me
-    first. The decision rule is whatever is passed in, so this reads the
+    Returns (name, "F"/"D", the team that means, points behind the lead, P(dog))
+    with me first. The decision rule is whatever is passed in, so this reads the
     equilibrium policy when one has been solved and the level-0 rule otherwise.
+
+    Under noise the action is only the MODAL tip, so the probability comes with it
+    -- printing the action bare would claim a certainty the model does not have.
     """
     scores = [me.points] + [r.points for r in rivals]
     errors = [float(me.margin_error)] + [float(r.margin_error) for r in rivals]
     names = [me.name] + [r.name for r in rivals]
-    acts = _actions(scores, errors, t, decide)
+    probs = [_as_dog_prob(decide(t, _standing(scores, errors, i)))
+             for i in range(len(names))]
+    acts = ["D" if q > 0.5 else "F" for q in probs]
 
     game = games[t]
     favourite = game.home if game.home_odds <= game.away_odds else game.away
     underdog = underdog_name(game)
     top = max(scores)
     return [
-        (names[i], acts[i], favourite if acts[i] == "F" else underdog, scores[i] - top)
+        (names[i], acts[i], favourite if acts[i] == "F" else underdog,
+         scores[i] - top, probs[i])
         for i in range(len(names))
     ]
 
@@ -1379,6 +1385,7 @@ def simulate_contingency(
     seed: int = 20260814,
     reluctance: float = RELUCTANCE,
     tau: float = TAU_TIP,
+    temperature: float = 0.0,
     headline: Optional[SimulatedRecommendation] = None,
     decide: Optional[Callable[[int, Tuple[Tuple[int, int], ...]], str]] = None,
 ) -> Dict[Tuple[int, int], SimulatedRecommendation]:
@@ -1403,6 +1410,7 @@ def simulate_contingency(
             cells[(t, d)] = simulate_branches(
                 shifted, rivals, games[t:], p_fav[t:], n_seasons=n_seasons,
                 seed=seed, reluctance=reluctance, tau=tau,
+                temperature=temperature,
                 decide=None if decide is None else _ShiftedPolicy(decide, t),
             )
     return cells
@@ -1727,6 +1735,7 @@ def report(
     tau: float,
     paths: SetPaths,
     reluctance: float = RELUCTANCE,
+    rival_noise: float = RIVAL_NOISE,
     n_seasons: int = 60_000,
     contingency_seasons: int = 6_000,
     equilibrium: bool = False,
@@ -1769,7 +1778,7 @@ def report(
                                       gap_clamp=eq_gap_clamp)
     sim = simulate_branches(me, rivals, games, p_fav, n_seasons=n_seasons,
                             seed=seed, reluctance=reluctance, tau=tau,
-                            decide=eq_policy)
+                            temperature=rival_noise, decide=eq_policy)
 
     g0 = games[0]
     fav0, dog0 = fav_names[0], underdog_name(g0)
@@ -1903,12 +1912,14 @@ def report(
         print()
         print("    What the whole field plays at %s in equilibrium:" % games[0].game_id)
         print()
-        for name, action, team, gap in board:
+        for name, action, team, gap, q in board:
             marker = "   <-- you" if name == me.name else ""
-            print("        %-16s %-4s %-20s %+3d%s"
-                  % (name, "dog" if action == "D" else "fav", team, gap, marker))
+            chance = "" if rival_noise <= 0.0 else "  p=%3.0f%%" % (100.0 * q)
+            print("        %-16s %-4s %-20s %+3d%s%s"
+                  % (name, "dog" if action == "D" else "fav", team, gap,
+                     chance, marker))
         print()
-        mine = next(a for n, a, _, _ in board if n == me.name)
+        mine = next(a for n, a, _, _, _ in board if n == me.name)
         if mine != sim.action:
             mine_team = fav0 if mine == "F" else dog0
             print("    Note: the learned rule plays %s for you here, but the headline"
@@ -1983,7 +1994,7 @@ def report(
         cells = simulate_contingency(
             me, rivals, games, p_fav, n_games=n_show, deltas=(-2, -1, 0, 1, 2),
             n_seasons=contingency_seasons, seed=seed, reluctance=reluctance,
-            tau=tau, headline=sim, decide=eq_policy,
+            tau=tau, temperature=rival_noise, headline=sim, decide=eq_policy,
         )
         print("CONTINGENCY TABLE  (next %d games, %d simulated seasons per cell)"
               % (n_show, contingency_seasons))
@@ -2079,6 +2090,10 @@ def report(
     print("  * tau = %.0f is ASSUMED, not fitted. Fill past rounds' margin tips to measure it." % tau)
     print("  * reluctance = %.2f is ASSUMED, not fitted. It is how much extra win" % reluctance)
     print("    probability a chaser needs before backing a heavy underdog.")
+    print("  * rival noise = %.2f is ASSUMED, not fitted. It is how uncertainly a"
+          % rival_noise)
+    print("    rival acts on a thin edge; at 0 they act with certainty on any edge,")
+    print("    so a knife-edge preference puts the whole chasing pack on one dog.")
     print("  * Rivals are level-0: they play the field, they do not respond to you.")
     print("  * The points leader tips favourites; chasers deviate per their own best")
     print("    response. The leader is read from the board, so scenarios reassign it.")
@@ -2214,6 +2229,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--reluctance", type=float, default=RELUCTANCE,
                         help="rivals' reluctance to back a heavy underdog "
                              "(default %.2f, 0 = pure expected value)" % RELUCTANCE)
+    parser.add_argument("--rival-noise", type=float, default=RIVAL_NOISE,
+                        help="how uncertainly rivals act on a thin edge, in win "
+                             "probability (default %.2f, 0 = certain)" % RIVAL_NOISE)
     parser.add_argument("--tau", type=float, default=TAU_TIP,
                         help="SD of rivals' margin tips around the line (default %.0f)" % TAU_TIP)
     parser.add_argument("--sims", type=int, default=100_000, help="countback Monte Carlo draws")
@@ -2252,6 +2270,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     result = report(me, rivals, games, args.devig, args.explain,
                     args.sims, args.seed, args.tau, paths, args.reluctance,
+                    args.rival_noise,
                     args.sim_seasons, args.contingency_seasons, args.equilibrium,
                     args.equilibrium_seasons, args.equilibrium_sweeps,
                     args.equilibrium_gap_clamp)
