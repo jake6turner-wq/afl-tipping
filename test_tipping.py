@@ -1279,5 +1279,81 @@ class TestSoftLevel0(unittest.TestCase):
         self.assertEqual(T.RIVAL_NOISE, 0.05)
 
 
+class TestNoisyDecisions(unittest.TestCase):
+    """The simulation's decision rule, once rivals stop being certain."""
+
+    GAMES = [
+        T.Game("G1", "R", "Thu", "A", "B", 1.40, 2.96, 16.5, True, None),
+        T.Game("G2", "R", "Fri", "C", "D", 2.44, 1.56, 10.5, False, None),
+        T.Game("G3", "R", "Sat", "E", "F", 2.22, 1.67, 4.5, False, None),
+    ]
+    P_FAV = [0.689, 0.616, 0.574]
+
+    def test_cache_returns_zero_or_one_at_zero_temperature(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP)
+        standing = ((1, -1), (0, 1))
+        for t in range(3):
+            self.assertIn(decide(t, standing), (0.0, 1.0))
+
+    def test_cache_returns_a_strict_probability_under_noise(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        q = decide(0, ((1, -1), (0, 1)))
+        self.assertGreater(q, 0.0)
+        self.assertLess(q, 1.0)
+
+    def test_actions_are_deterministic_when_no_draws_are_supplied(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        scores, errors = [155, 156, 154], [577.0, 628.0, 583.0]
+        first = T._actions(scores, errors, 0, decide)
+        for _ in range(5):
+            self.assertEqual(T._actions(scores, errors, 0, decide), first)
+
+    def test_draws_select_the_action(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        scores, errors = [155, 156, 154], [577.0, 628.0, 583.0]
+        all_low = T._actions(scores, errors, 0, decide, draws=[0.0, 0.0, 0.0])
+        all_high = T._actions(scores, errors, 0, decide, draws=[0.0, 1.0, 1.0])
+        # Index 0 is me and never draws, so only the rivals may differ.
+        self.assertEqual(all_low[0], all_high[0])
+        self.assertNotEqual(all_low[1:], all_high[1:])
+
+    def test_i_never_draw(self):
+        decide = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                   temperature=0.05)
+        scores, errors = [155, 156, 154], [577.0, 628.0, 583.0]
+        mine = T._actions(scores, errors, 0, decide, draws=[0.0, 0.5, 0.5])[0]
+        for u in (0.0, 0.25, 0.5, 0.75, 1.0):
+            got = T._actions(scores, errors, 0, decide, draws=[u, 0.5, 0.5])[0]
+            self.assertEqual(got, mine)
+
+    def test_decide_me_overrides_index_zero_only(self):
+        rivals_rule = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                        temperature=0.05)
+        scores, errors = [155, 156, 154], [577.0, 628.0, 583.0]
+        always_dog = lambda t, standing: 1.0
+        acts = T._actions(scores, errors, 0, rivals_rule,
+                          draws=[0.0, 0.0, 0.0], decide_me=always_dog)
+        self.assertEqual(acts[0], "D")
+
+    def test_equilibrium_policy_keeps_one_contract_on_every_path(self):
+        # It answers with an action whether the state was learned or fell back,
+        # even when the fallback underneath it is a noisy probability.
+        noisy = T._decision_cache(self.P_FAV, 0.10, T.DELTA_CLAMP,
+                                  temperature=0.05)
+        policy = T.EquilibriumPolicy({}, noisy, 100, 1, 0, 0.0)
+        self.assertIn(policy(0, ((1, -1),)), ("F", "D"))
+        table = {(0, ((1, -1),)): "D"}
+        learned = T.EquilibriumPolicy(table, noisy, 100, 1, 0, 0.0)
+        self.assertEqual(learned(0, ((1, -1),)), "D")
+
+    def test_as_dog_prob_accepts_both_forms(self):
+        self.assertEqual(T._as_dog_prob("D"), 1.0)
+        self.assertEqual(T._as_dog_prob("F"), 0.0)
+        self.assertEqual(T._as_dog_prob(0.37), 0.37)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

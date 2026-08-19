@@ -662,8 +662,9 @@ def solve_joint(
 # making their own choice rather than inheriting a group's.
 # --------------------------------------------------------------------------------
 
-def _decision_cache(p_fav: Sequence[float], reluctance: float, clamp: int):
-    """Build the cached 'should I take the dog' lookup.
+def _decision_cache(p_fav: Sequence[float], reluctance: float, clamp: int,
+                    temperature: float = 0.0):
+    """Build the cached 'how likely am I to take the dog' lookup.
 
     A tipster believes the rest of the field tips favourites from here, so their
     decision depends on where they stand against EVERY opponent -- on points and on
@@ -674,10 +675,15 @@ def _decision_cache(p_fav: Sequence[float], reluctance: float, clamp: int):
     The state is therefore the multiset of (points gap, who wins a tie) over the
     opponents. It is order-independent, so sorting it canonicalises the key and the
     DP runs a few thousand times across a whole run rather than millions.
-    """
-    cache: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], str] = {}
 
-    def action(t: int, standing: Tuple[Tuple[int, int], ...]) -> str:
+    Returns P(take the dog). At `temperature` 0 that is always 0.0 or 1.0, which is
+    the old certain behaviour; above zero the caller draws against it. The
+    probability is deterministic given the state, so the cache is as effective as
+    it ever was -- only the draw moves out to the caller.
+    """
+    cache: Dict[Tuple[int, Tuple[Tuple[int, int], ...]], float] = {}
+
+    def action(t: int, standing: Tuple[Tuple[int, int], ...]) -> float:
         key = (t, standing)
         hit = cache.get(key)
         if hit is not None:
@@ -699,9 +705,10 @@ def _decision_cache(p_fav: Sequence[float], reluctance: float, clamp: int):
                 value *= 0.5                  # level on points AND on error
             return value
 
-        _, policy = solve_level0(p_fav[t:], terminal, clamp=clamp,
-                                 reluctance=reluctance)
-        result = policy[0][clamp]     # their delta is 0 as of right now
+        _, dog_prob = solve_level0_soft(p_fav[t:], terminal, clamp=clamp,
+                                        reluctance=reluctance,
+                                        temperature=temperature)
+        result = dog_prob[0][clamp]   # their delta is 0 as of right now
         cache[key] = result
         return result
 
@@ -778,7 +785,23 @@ def conceded_games(games: Sequence[Game], threshold: float) -> frozenset:
                      if min(game.home_odds, game.away_odds) < threshold)
 
 
-def _actions(scores, errors, t, decide) -> List[str]:
+def _as_dog_prob(decision) -> float:
+    """Normalise a decision rule's answer to P(take the dog).
+
+    Two kinds of rule reach `_actions`. The level-0 cache returns a probability,
+    because that is what noise makes of it. `EquilibriumPolicy` returns an action,
+    because its learned table stores a chosen action rather than a mix. Accepting
+    both here keeps that difference where it belongs -- in what each rule actually
+    knows -- rather than forcing one to lie about the other.
+    """
+    if decision == "D":
+        return 1.0
+    if decision == "F":
+        return 0.0
+    return float(decision)
+
+
+def _actions(scores, errors, t, decide, draws=None, decide_me=None) -> List[str]:
     """Each tipster's action given the live standings, using margin errors as
     accumulated so far in this very season.
 
@@ -786,10 +809,24 @@ def _actions(scores, errors, t, decide) -> List[str]:
     nothing to gain by differentiating, so the DP picks the favourite for them on
     its own -- and a tipster who is level on points but behind on the countback is
     NOT winning, and correctly keeps chasing.
+
+    `decide` returns P(take the dog). `draws` supplies one pre-drawn uniform per
+    tipster; where it is absent the modal action is taken, which is what the report
+    wants when it is describing a position rather than playing it out.
+
+    Index 0 is me and never draws: my recommendation is a best response to a noisy
+    field, not itself noisy. `decide_me` lets me answer a different rule from the
+    rivals, which is how my policy stays deterministic while theirs is not.
     """
+
     acts = []
     for i in range(len(scores)):
-        acts.append(decide(t, _standing(scores, errors, i)))
+        rule = decide_me if (i == 0 and decide_me is not None) else decide
+        q = _as_dog_prob(rule(t, _standing(scores, errors, i)))
+        if i == 0 or draws is None:
+            acts.append("D" if q > 0.5 else "F")
+        else:
+            acts.append("D" if draws[i] < q else "F")
     return acts
 
 
@@ -1057,6 +1094,11 @@ class EquilibriumPolicy:
     `_actions` and therefore into every part of the report that takes a decision
     rule. States never visited during solving fall back to the level-0 rule rather
     than guessing, and the fallbacks are counted.
+
+    It returns an ACTION, not a probability, on every path including the fallback.
+    The learned table stores a chosen action rather than a mix, so an equilibrium
+    run is deterministic end to end and rival noise does not reach it -- see the
+    spec's limitations. `_actions` accepts either form.
     """
 
     def __init__(self, table, fallback, n_seasons, sweeps, min_samples, flip_rate,
@@ -1083,7 +1125,7 @@ class EquilibriumPolicy:
     def settled(self) -> bool:
         return self.flip_rate <= SETTLED_TOL
 
-    def __call__(self, t: int, standing: Tuple[Tuple[int, int], ...]) -> str:
+    def __call__(self, t: int, standing: Tuple[Tuple[int, int], ...]):
         if t in self.conceded:
             # Assumed, not learned, so this is neither a hit nor a fallback. Counting
             # it either way would misreport how much of the table is real.
@@ -1094,7 +1136,10 @@ class EquilibriumPolicy:
             self.hits += 1
             return hit
         self.misses += 1
-        return self.fallback(t, standing)
+        # The fallback may be a noisy level-0 cache. Take its modal action so this
+        # rule keeps one contract on every path rather than leaking a probability
+        # out of some states and an action out of others.
+        return "D" if _as_dog_prob(self.fallback(t, standing)) > 0.5 else "F"
 
 
 def solve_equilibrium(
