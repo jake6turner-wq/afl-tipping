@@ -79,6 +79,7 @@ SIGMA_MARGIN = 37.0   # SD of actual margin around the line
 TAU_TIP = 10.0        # SD of tipsters' margin tips around the line (ASSUMED, not fitted)
 DELTA_CLAMP = 20      # |delta| never needs to exceed the number of remaining games
 RELUCTANCE = 0.10     # rivals' reluctance to back a heavy underdog (ASSUMED, not fitted)
+RIVAL_NOISE = 0.05    # temperature on rivals' deviation choice (ASSUMED, not fitted)
 
 # Below this price the equilibrium solver assumes the whole field tips the favourite.
 # If everyone tips it, every score moves together and the gaps never change, so the
@@ -324,27 +325,43 @@ def pairwise_countback_static(a: Tipster, b: Tipster) -> float:
 # delta unchanged; tipping the dog moves it +1 if the dog wins, -1 if it loses.
 # --------------------------------------------------------------------------------
 
-def solve_level0(
+def _clip_exp(x: float, limit: float = 700.0) -> float:
+    """Keep the logistic argument inside the range math.exp can represent."""
+    return max(-limit, min(limit, x))
+
+
+def solve_level0_soft(
     p_fav: Sequence[float],
     terminal: Callable[[int], float],
     clamp: int = DELTA_CLAMP,
     reluctance: float = 0.0,
-) -> Tuple[List[List[float]], List[List[str]]]:
-    """Exact DP. Returns (values, policy); index delta as [t][delta + clamp].
+    temperature: float = 0.0,
+) -> Tuple[List[List[float]], List[List[float]]]:
+    """Exact DP over a tipster's own delta. Returns (values, dog_prob).
+
+    Both are indexed `[t][delta + clamp]`. `dog_prob[t][i]` is the probability this
+    tipster takes the dog at game `t` from delta `i - clamp`.
 
     `reluctance` scales a penalty the deviation edge must clear before the dog is
     taken: `reluctance * max(0, p - 0.5)`. It is zero at a coin flip and largest at
     a certainty, which is what makes a modelled tipster deviate in close games and
-    baulk at heavy favourites. At 0.0 this is the plain expected-value DP.
+    baulk at heavy favourites.
 
-    The penalty selects the ACTION only. The value stored is always the true value
-    of whichever action was chosen, never the penalised one -- everything
-    downstream reads these as real win probabilities.
+    `temperature` is how decisively the tipster acts on the edge that survives the
+    penalty. At 0.0 this is a hard argmax and `dog_prob` is all 0.0 and 1.0 --
+    exactly the old behaviour. Above zero the action is logistic in the edge and
+    the value is the mixture, so a tipster's stored value reflects the noisy player
+    they will actually be rather than an optimal one they will not.
+
+    The stored value is always a real win probability. Under noise it is the win
+    probability of the noisy behavioural policy, which is a truer number than the
+    optimal-play value, not a less real one -- and every consumer of `values`
+    depends on it being a genuine probability.
     """
     n = len(p_fav)
     size = 2 * clamp + 1
     values = [[0.0] * size for _ in range(n + 1)]
-    policy = [["F"] * size for _ in range(n)]
+    dog_prob = [[0.0] * size for _ in range(n)]
 
     for d in range(-clamp, clamp + 1):
         values[n][d + clamp] = terminal(d)
@@ -363,10 +380,39 @@ def solve_level0(
             # must never make a tipster prefer a CERTAIN loss to a live chance. With
             # nothing left to protect there is nothing to be reluctant about.
             floor = penalty if v_fav > 0.0 else 0.0
-            if v_dog > v_fav + floor + 1e-12:
-                values[t][i], policy[t][i] = v_dog, "D"
+            edge = v_dog - v_fav - floor
+
+            if temperature <= 0.0:
+                q = 1.0 if edge > 1e-12 else 0.0
+            elif v_fav <= 0.0 and v_dog <= 0.0:
+                # Dead: every branch is worth nothing, so the edge is zero and the
+                # logistic would return a coin flip. An eliminated tipster cannot
+                # affect anyone's finishing position, but reporting them as
+                # flipping coins every game makes the field look deranged.
+                q = 0.0
             else:
-                values[t][i], policy[t][i] = v_fav, "F"
+                q = 1.0 / (1.0 + math.exp(-_clip_exp(edge / temperature)))
+
+            values[t][i] = q * v_dog + (1.0 - q) * v_fav
+            dog_prob[t][i] = q
+    return values, dog_prob
+
+
+def solve_level0(
+    p_fav: Sequence[float],
+    terminal: Callable[[int], float],
+    clamp: int = DELTA_CLAMP,
+    reluctance: float = 0.0,
+) -> Tuple[List[List[float]], List[List[str]]]:
+    """Exact DP, hard argmax. Returns (values, policy); index delta as [t][delta + clamp].
+
+    The deterministic face of `solve_level0_soft`, kept because the exact grouped
+    solve reads a policy of strings and must stay deterministic -- see the spec's
+    scope section for why noise cannot cross into the grouped DP.
+    """
+    values, dog_prob = solve_level0_soft(p_fav, terminal, clamp=clamp,
+                                         reluctance=reluctance, temperature=0.0)
+    policy = [["D" if q > 0.5 else "F" for q in row] for row in dog_prob]
     return values, policy
 
 

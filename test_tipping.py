@@ -1185,5 +1185,99 @@ class TestInputSets(unittest.TestCase):
         self.assertNotIn("NOT REALITY", T.set_banner(T.resolve_set(T.DEFAULT_SET)))
 
 
+
+
+class TestSoftLevel0(unittest.TestCase):
+    """Probabilistic deviation: a logistic on the edge, with soft value iteration."""
+
+    FIXTURE = [0.585, 0.655, 0.66, 0.68, 0.69, 0.76, 0.853, 0.96]
+
+    def target(self, need):
+        return lambda d: 1.0 if d >= need else 0.0
+
+    def test_zero_temperature_reproduces_the_hard_policy(self):
+        # The whole backwards-compatibility guarantee in one assertion.
+        for reluctance in (0.0, 0.10, 0.5):
+            values, policy = T.solve_level0(self.FIXTURE, self.target(2),
+                                            reluctance=reluctance)
+            soft_v, dog_p = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                                reluctance=reluctance,
+                                                temperature=0.0)
+            self.assertEqual(values, soft_v)
+            for t, row in enumerate(policy):
+                for i, act in enumerate(row):
+                    self.assertIn(dog_p[t][i], (0.0, 1.0))
+                    self.assertEqual(act, "D" if dog_p[t][i] == 1.0 else "F")
+
+    def test_probabilities_are_valid(self):
+        _, dog_p = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                       reluctance=0.10, temperature=0.05)
+        for row in dog_p:
+            for q in row:
+                self.assertGreaterEqual(q, 0.0)
+                self.assertLessEqual(q, 1.0)
+
+    def test_values_remain_probabilities(self):
+        for temperature in (0.0, 0.02, 0.05, 0.15, 1.0):
+            values, _ = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                            reluctance=0.10,
+                                            temperature=temperature)
+            for row in values:
+                for v in row:
+                    self.assertGreaterEqual(v, 0.0)
+                    self.assertLessEqual(v, 1.0)
+
+    def test_a_zero_edge_is_a_coin_flip(self):
+        # One game, and the target is met either way, so taking the dog neither
+        # gains nor costs: v_dog == v_fav, the game is live, so q == 0.5.
+        # reluctance=0 keeps the penalty out of it.
+        _, dog_p = T.solve_level0_soft([0.5], lambda d: 1.0, clamp=3,
+                                       reluctance=0.0, temperature=0.05)
+        self.assertAlmostEqual(dog_p[0][3], 0.5, places=9)
+
+    def test_a_dead_state_does_not_coin_flip(self):
+        # Cannot win from anywhere: v_fav == v_dog == 0. The logistic would say
+        # 50%, which would have eliminated rivals flipping coins every game.
+        _, dog_p = T.solve_level0_soft(self.FIXTURE, lambda d: 0.0,
+                                       reluctance=0.10, temperature=0.05)
+        for row in dog_p:
+            for q in row:
+                self.assertEqual(q, 0.0)
+
+    def test_probability_is_monotone_in_the_edge(self):
+        # Raising the bar the tipster must clear can only make the dog more
+        # attractive at delta 0, never less.
+        _, easy = T.solve_level0_soft(self.FIXTURE, self.target(0),
+                                      reluctance=0.0, temperature=0.05)
+        _, hard = T.solve_level0_soft(self.FIXTURE, self.target(3),
+                                      reluctance=0.0, temperature=0.05)
+        self.assertLess(easy[0][T.DELTA_CLAMP], hard[0][T.DELTA_CLAMP])
+
+    def test_higher_temperature_pulls_towards_a_coin_flip(self):
+        # A confident state at low temperature must get less confident as the
+        # temperature rises.
+        sharp = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                    reluctance=0.10, temperature=0.01)[1]
+        blunt = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                    reluctance=0.10, temperature=0.30)[1]
+        i = T.DELTA_CLAMP
+        for t in range(len(self.FIXTURE)):
+            if sharp[t][i] in (0.0, 1.0):
+                continue
+            self.assertLess(abs(blunt[t][i] - 0.5), abs(sharp[t][i] - 0.5) + 1e-12)
+
+    def test_noise_costs_the_tipster_value(self):
+        # Acting noisily cannot be worth more than acting optimally.
+        opt, _ = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                     reluctance=0.0, temperature=0.0)
+        noisy, _ = T.solve_level0_soft(self.FIXTURE, self.target(2),
+                                       reluctance=0.0, temperature=0.05)
+        self.assertLessEqual(noisy[0][T.DELTA_CLAMP],
+                             opt[0][T.DELTA_CLAMP] + 1e-12)
+
+    def test_default_constant(self):
+        self.assertEqual(T.RIVAL_NOISE, 0.05)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
