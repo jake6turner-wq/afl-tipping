@@ -145,11 +145,28 @@ index 0 (me) bypasses the draw.
 
 ### `--equilibrium`
 
-The equilibrium learner shares the simulation machinery and inherits noisy rivals
-by construction. This is desirable — learning a best response against a noisy
-field beats learning against a deterministic bloc. In scope to the extent of
-verifying the path still runs and still reports sane diagnostics (states learned,
-thinnest sample, fallback rate, non-convergence warning).
+**Corrected during implementation.** The intent was that the equilibrium learner
+would inherit noisy rivals by construction, since it shares the simulation
+machinery. It does not, and cannot without a larger change.
+
+`EquilibriumPolicy`'s learned table stores a chosen *action* per state, not a
+mixture. Every tipster in an equilibrium run answers that table, so the whole
+field is deterministic and the bloc behaviour this design exists to remove is
+fully intact under `--equilibrium`. The only states noise could reach are the
+unlearned ones that fall back to the level-0 cache, and letting a probability out
+of those while actions come out of the rest would give one rule two contracts.
+The fallback therefore takes its modal action, and `--equilibrium` is
+deterministic end to end.
+
+`solve_equilibrium` takes no `temperature` parameter, because it would provably do
+nothing.
+
+What is in scope: verifying the path still runs and reports sane diagnostics, and
+making the limitation visible rather than silent — `field_tips` returns the dog
+probability and the equilibrium board prints it, so a run whose `p=` column is all
+0% and 100% is showing the reader exactly this.
+
+Making the learned table store probabilities is a separate piece of work.
 
 ## Testing
 
@@ -162,6 +179,8 @@ thinnest sample, fallback rate, non-convergence warning).
 - Rivals sharing a policy take **different** actions within a single simulated
   season — the bloc is genuinely broken, not merely softened in the table.
 - Both branches of a paired season observe identical rival noise draws.
+- Noise off consumes exactly the RNG draws it always did, so switching it off
+  reproduces pre-feature numbers rather than merely similar ones.
 - Raising the temperature widens the spread of `WHO WINS THE COMP`.
 - The `--equilibrium` path runs to completion with noise active.
 
@@ -169,6 +188,8 @@ thinnest sample, fallback rate, non-convergence warning).
 
 - Fitting the temperature from observed rival behaviour. It is assumed, like `tau`
   and `reluctance`.
+- Teaching the equilibrium learner to store probabilities rather than actions,
+  which is what `--equilibrium` would need before noise could reach it.
 - Per-rival heterogeneous risk appetite (each rival drawing its own `reluctance`).
   Considered and set aside; noise on a shared rule is the smaller assumption and
   already breaks the bloc.
